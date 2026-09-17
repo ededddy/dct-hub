@@ -199,6 +199,25 @@ class ArtifactStore:
             row = self._db.execute("SELECT MAX(created_at) FROM jobs WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
 
+    def list_renders(self, board: str, limit: int = 10) -> list[RenderRecord]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM renders WHERE board = ? AND status = 'ok' ORDER BY rendered_at DESC, rowid DESC LIMIT ?",
+                (board, limit),
+            ).fetchall()
+        return [self._to_record(row) for row in rows]
+
+    def latest_renders(self) -> dict[str, RenderRecord]:
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT r.* FROM renders r
+                JOIN (SELECT board, MAX(rendered_at) AS m FROM renders WHERE status = 'ok' GROUP BY board) t
+                  ON r.board = t.board AND r.rendered_at = t.m
+                """
+            ).fetchall()
+        return {row[1]: self._to_record(row) for row in rows}
+
     def _to_job(self, row: tuple) -> JobRecord:
         return JobRecord(
             id=row[0],

@@ -36,6 +36,7 @@ from .dct import Dct, DctError
 from .policy import CachePolicy, Freshness
 from .queue import RenderQueue
 from .store import ArtifactStore, JobRecord, RenderRecord, utcnow_iso
+from .ui import register_ui
 
 MEDIA_TYPES = {
     "html": "text/html",
@@ -80,9 +81,16 @@ class RenderService:
             timeout_s=config.render.timeout_s,
             query_cache=config.render.query_cache,
         )
-        self.policy = CachePolicy(config.policy, describe=lambda board_file: self.dct.describe(board_file))
+        self.policy = CachePolicy(config.policy, describe=self.describe_cached)
         concurrency = 1 if config.render.query_cache else config.policy.max_concurrent
         self.queue = RenderQueue(self.store, concurrency, self.execute_render)
+        self._describe_cache: dict[str, dict] = {}
+
+    async def describe_cached(self, board_file: Path) -> dict:
+        fingerprint = board_fingerprint(self.config.charts_root, board_file, self.config.project_dir / "dbt_charts.yml")
+        if fingerprint not in self._describe_cache:
+            self._describe_cache[fingerprint] = await self.dct.describe(board_file)
+        return self._describe_cache[fingerprint]
 
     def _resolve(self, board_ref: str) -> tuple[str, Path]:
         try:
@@ -110,7 +118,7 @@ class RenderService:
         return None
 
     async def lookup(self, board: str, variables: dict[str, Any], fmt: str) -> tuple[RenderRecord | None, str, Path, str, dict[str, str]]:
-        variables = {k: str(v) for k, v in variables.items()}
+        variables = {k: str(v) for k, v in variables.items() if str(v) != ""}
         _, board_file = self._resolve(board)
         key, _, fingerprint = await self._key(board, board_file, variables, fmt)
         return self._usable(self.store.get(key)), key, board_file, fingerprint, variables
@@ -335,8 +343,8 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         except DctError as exc:
             raise HTTPException(status_code=502, detail=exc.stderr[-1000:])
 
-    @app.get("/b/{board:path}")
-    async def view_board(board: str, request: Request) -> FileResponse:
+    @app.get("/raw/{board:path}")
+    async def raw_board(board: str, request: Request) -> FileResponse:
         board = service._normalize(board)
         variables_qs = dict(request.query_params)
         identity = authorize(request, "view", board)
@@ -369,7 +377,15 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         return FileResponse(
             record.artifact_path,
             media_type="text/html",
-            headers={"X-Dct-Hub-Key": record.key, "X-Rendered-At": record.rendered_at},
+            headers={
+                "X-Dct-Hub-Key": record.key,
+                "X-Rendered-At": record.rendered_at,
+                # artifacts are replaced in place after a refresh; never let
+                # the browser serve its own cached copy
+                "Cache-Control": "no-cache",
+            },
         )
+
+    register_ui(app, service, config, identity_of, authorize)
 
     return app

@@ -58,15 +58,15 @@ def test_render_then_cached(client):
     assert status.json()["vars"] == {"region": "West"}
 
 
-def test_view_board_renders_on_miss_and_serves_html(client):
+def test_raw_board_renders_on_miss_and_serves_html(client):
     client, fake = client
 
-    resp = client.get("/b/sales_daily?region=East&day=2026-09-16")
+    resp = client.get("/raw/sales_daily?region=East&day=2026-09-16")
     assert resp.status_code == 200
     assert "rendered" in resp.text
     assert resp.headers["x-dct-hub-key"]
 
-    again = client.get("/b/sales_daily?region=East&day=2026-09-16")
+    again = client.get("/raw/sales_daily?region=East&day=2026-09-16")
     assert len(fake.renders) == 1
     assert again.text == resp.text
 
@@ -101,7 +101,7 @@ def test_e2e_real_dct_render():
             assert cached.json()["cached"] is True
             assert cached.json()["key"] == resp.json()["key"]
 
-            view = client.get("/b/sales_daily?day=2026-09-16")
+            view = client.get("/raw/sales_daily?day=2026-09-16")
             assert view.status_code == 200
             assert "<" in view.text
     finally:

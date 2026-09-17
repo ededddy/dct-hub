@@ -152,7 +152,7 @@ def test_oidc_login_then_grants_enforced(env):
     assert client.get("/b/sales_daily").status_code == 200
     assert len(fake.renders) == 1
     assert client.post("/api/renders", json={"board": "sales_daily"}).status_code == 403
-    assert client.get("/b/finance/q4").status_code == 403  # render-on-miss needs refresh
+    assert client.get("/raw/finance/q4").status_code == 403  # render-on-miss needs refresh
     assert client.get("/b/restricted/board").status_code == 403  # no grant for data group
 
     # catalog hides restricted boards

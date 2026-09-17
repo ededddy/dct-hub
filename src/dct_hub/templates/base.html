@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}dct-hub{% endblock %}</title>
+  <style>
+    :root {
+      --ink: #1a1d21; --muted: #667085; --line: #e4e7ec; --bg: #f7f7f5;
+      --card: #ffffff; --accent: #175cd3; --accent-ink: #ffffff;
+      --ok: #067647; --warn: #b54708; --ice: #475467;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink);
+           font: 15px/1.5 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header.top { display: flex; align-items: center; justify-content: space-between;
+                 padding: 0 24px; height: 56px; background: var(--card);
+                 border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; }
+    .brand { font-weight: 700; font-size: 16px; color: var(--ink); }
+    .brand:hover { text-decoration: none; }
+    .who { color: var(--muted); font-size: 13px; }
+    .who a { margin-left: 12px; }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px;
+             font-size: 12px; font-weight: 600; white-space: nowrap; }
+    .badge.frozen { background: #eef4ff; color: var(--accent); }
+    .badge.fresh { background: #ecfdf3; color: var(--ok); }
+    .badge.stale { background: #fffaeb; color: var(--warn); }
+    .badge.never { background: #f2f4f7; color: var(--ice); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+    button.primary { background: var(--accent); color: var(--accent-ink); border: 0;
+                     border-radius: 6px; padding: 7px 14px; font-weight: 600; cursor: pointer; }
+    button.primary:disabled { opacity: .6; cursor: default; }
+  </style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">dct-hub</a>
+  <div class="who">
+    {% if user %}<span>{{ user.name or user.sub }}</span><a href="/auth/logout">log out</a>
+    {% elif auth_on %}<a href="/auth/login?next=/">log in</a>{% endif %}
+  </div>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

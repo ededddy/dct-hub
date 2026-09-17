@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Boards · dct-hub{% endblock %}
+{% block content %}
+<style>
+  .search { display: flex; gap: 8px; margin: 8px 0 20px; }
+  .search input { flex: 1; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; background: var(--card); }
+  .folder { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em;
+            text-transform: uppercase; margin: 22px 0 8px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; position: relative; }
+  .card:hover { border-color: #c4cdd9; }
+  .card h3 { margin: 0 0 4px; font-size: 15px; }
+  .card h3 a { color: var(--ink); }
+  .card .notes { color: var(--muted); font-size: 13px; margin: 0 0 10px;
+                 display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card .meta { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12.5px; }
+  .fav { position: absolute; top: 10px; right: 12px; border: 0; background: none; cursor: pointer;
+         font-size: 15px; color: #d0d5dd; padding: 2px; }
+  .fav.on { color: #f79009; }
+  .section-title { font-size: 13px; font-weight: 700; color: var(--muted); margin: 0 0 8px; }
+  #recents, #favorites { margin-bottom: 8px; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; font-size: 13px; color: var(--ink); }
+  .empty { color: var(--muted); margin-top: 40px; text-align: center; }
+</style>
+
+<form class="search" method="get" action="/">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search boards…" autofocus>
+  <button class="primary" type="submit">Search</button>
+</form>
+
+<div id="favorites" hidden>
+  <p class="section-title">Favorites</p>
+  <div class="pill-row" id="favorite-pills"></div>
+</div>
+<div id="recents" hidden>
+  <p class="section-title">Recently viewed</p>
+  <div class="pill-row" id="recent-pills"></div>
+</div>
+
+{% for folder, cards in groups %}
+  {% if folder %}<p class="folder">{{ folder }}</p>{% endif %}
+  <div class="grid">
+    {% for c in cards %}
+    <div class="card">
+      <button class="fav" data-board="{{ c.board }}" title="favorite">★</button>
+      <h3><a href="{{ c.url }}">{{ c.title }}</a></h3>
+      <p class="notes">{{ c.notes }}</p>
+      <div class="meta">
+        <span class="mono">{{ c.board }}</span>
+        {% if c.last_rendered %}
+          <span class="badge fresh">rendered {{ c.last_rendered }}</span>
+        {% else %}
+          <span class="badge never">never rendered</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="empty">{% if q %}No boards matching “{{ q }}”.{% else %}No boards you can view.{% endif %}</p>
+{% endfor %}
+
+<script>
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)) || []; } catch { return []; } },
+  set(k, v) { localStorage.setItem(k, JSON.stringify(v)); },
+};
+const FAVS = 'dct-hub:favorites', RECENTS = 'dct-hub:recents';
+
+function pill(item) {
+  const a = document.createElement('a');
+  a.className = 'pill'; a.href = '/b/' + item.board; a.textContent = item.title || item.board;
+  return a;
+}
+const favs = store.get(FAVS);
+if (favs.length) {
+  const box = document.getElementById('favorite-pills');
+  favs.forEach(f => box.appendChild(pill(f)));
+  document.getElementById('favorites').hidden = false;
+}
+const recents = store.get(RECENTS).slice(0, 8);
+if (recents.length) {
+  const box = document.getElementById('recent-pills');
+  recents.forEach(r => box.appendChild(pill(r)));
+  document.getElementById('recents').hidden = false;
+}
+document.querySelectorAll('.fav').forEach(btn => {
+  const board = btn.dataset.board;
+  const title = btn.parentElement.querySelector('h3 a').textContent;
+  const sync = () => btn.classList.toggle('on', store.get(FAVS).some(f => f.board === board));
+  sync();
+  btn.addEventListener('click', () => {
+    let list = store.get(FAVS);
+    list = list.some(f => f.board === board)
+      ? list.filter(f => f.board !== board)
+      : [{board, title}, ...list].slice(0, 24);
+    store.set(FAVS, list); sync();
+  });
+});
+</script>
+{% endblock %}

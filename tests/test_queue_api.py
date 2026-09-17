@@ -109,11 +109,11 @@ def test_min_interval_rate_limits_stale_refresh(tmp_path):
 def test_stale_while_revalidate_on_view(tmp_path):
     fake = FakeDct()
     with TestClient(make_app(tmp_path, fake, default_ttl_s=0, min_interval_s=0)) as client:
-        assert client.get("/b/sales_daily").status_code == 200
+        assert client.get("/raw/sales_daily").status_code == 200
         assert len(fake.renders) == 1
 
         # stale: served immediately, background refresh enqueued
-        assert client.get("/b/sales_daily").status_code == 200
+        assert client.get("/raw/sales_daily").status_code == 200
         deadline = time.monotonic() + 5
         while len(fake.renders) < 2 and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -129,7 +129,7 @@ def test_failed_render_marks_job_error(tmp_path):
         assert jobs[0]["status"] == "error"
         assert "query exploded" in jobs[0]["error"]
         # the failure is recorded but never served as an artifact
-        assert client.get("/b/sales_daily").status_code == 502
+        assert client.get("/raw/sales_daily").status_code == 502
 
 
 def test_failed_refresh_preserves_last_good_artifact(tmp_path):
@@ -142,7 +142,7 @@ def test_failed_refresh_preserves_last_good_artifact(tmp_path):
         resp = client.post("/api/renders", json={"board": "sales_daily", "force": True, "wait": True})
         assert resp.status_code == 502
         # the previous good artifact is still served (background re-render fails harmlessly)
-        assert client.get("/b/sales_daily").status_code == 200
+        assert client.get("/raw/sales_daily").status_code == 200
         assert len(fake.renders) == 1
 
 

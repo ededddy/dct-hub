@@ -4,11 +4,22 @@ Serving layer for [dbt Charts](https://docs.dbtcharts.com/) (`dct`): on-demand
 board rendering over HTTP, a content-addressed artifact cache (frozen snapshots
 for past dates, TTL for today), access control, and a catalog UI.
 
-Status: **M3** — M1 (render API, artifact store, cache keys) + M2 (Keycloak
-OIDC, service tokens, path-based grants) + async render queue with
-single-flight coalescing, and the freshness policy: frozen snapshots for past
-dates, TTL for current data, stale-while-revalidate on views, per-artifact
-rate limiting. The catalog UI comes in M4.
+Status: **M4** — M1 (render API, artifact store, cache keys) + M2 (Keycloak
+OIDC, service tokens, path-based grants) + M3 (async render queue, frozen/TTL
+freshness policy, stale-while-revalidate) + the catalog UI. Remaining: M5
+(Docker packaging for air-gapped deploy).
+
+## UI
+
+`/` is the catalog home: search (via `dct search`, grant-filtered), boards
+grouped by folder, freshness badges, favorites and recently-viewed
+(client-side, localStorage). `/b/<board>` is the board page: auto-generated
+variable controls (select/date/number/text from the board's declared
+variables), freshness badge (frozen snapshot / fresh / stale), a refresh
+button shown only with the `refresh` grant, and snapshot history with links to
+earlier variable combinations. The rendered artifact loads in an iframe from
+`/raw/<board>` (the M1–M3 artifact endpoint moved there; `/b/` is now the
+shell). All assets are inline — no CDN, air-gap safe.
 
 ## Quickstart
 
@@ -45,7 +56,9 @@ curl localhost:8080/api/renders/<key>          # artifact metadata
 curl localhost:8080/api/renders/<key>/artifact # raw artifact
 curl localhost:8080/api/boards                 # catalog
 curl localhost:8080/api/boards/sales_daily     # dct describe passthrough
-open  localhost:8080/b/sales_daily?day=2026-09-16  # board HTML
+open  localhost:8080/                              # catalog home (UI)
+open  localhost:8080/b/sales_daily?day=2026-09-16  # board page (shell + controls)
+curl "localhost:8080/raw/sales_daily?day=2026-09-16"  # raw artifact HTML
 ```
 
 Artifacts land in `.hub/artifacts/<board>/<key>.html`, render and job metadata
