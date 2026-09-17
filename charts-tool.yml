@@ -1,0 +1,13 @@
+# dct-hub dev config: points at the bundled sample project.
+project_dir: ./sample_project
+host: 127.0.0.1
+port: 8080
+dct_bin: dct
+storage:
+  dir: .hub
+render:
+  format: html
+  timeout_s: 120
+  # Shared dct query-result cache (L1). All renders serialize on it
+  # (DuckDB single-writer), which dct-hub's render lock enforces.
+  query_cache: .hub/query-cache.duckdb

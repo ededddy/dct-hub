@@ -1,0 +1,135 @@
+# Sample board over the CSV source in dbt_charts.yml.
+#
+# Demonstrates the two controls dct-hub's cache policy cares about:
+#   day    — a date picker; past dates render identical output forever (frozen),
+#            today's board changes as the intraday data fills in (TTL)
+#   region — a select; each value is its own cached artifact
+#
+# Regenerate data: python scripts/gen_data.py [--complete-today]
+
+title: Daily sales report
+notes: >
+  Revenue and orders by day from sample_project/data/sales.csv, with a report
+  date and an optional region filter.
+
+source: sample
+
+variables:
+  day:
+    input: date
+    label: Report date
+    default: 2026-09-17
+  region:
+    input: select
+    options:
+      static: [East, West, Central]
+
+queries:
+  day_kpi:
+    type: sql
+    sql: |
+      SELECT
+        SUM(revenue) AS revenue,
+        SUM(orders) AS orders,
+        SUM(revenue) / NULLIF(SUM(orders), 0) AS avg_order
+      FROM sales
+      WHERE date = CAST({{ day }} AS DATE)
+      {% if region %}AND {{ filter('region', region) }}{% endif %}
+
+  trend:
+    type: sql
+    sql: |
+      SELECT
+        date,
+        SUM(revenue) AS revenue,
+        SUM(orders) AS orders
+      FROM sales
+      WHERE date BETWEEN CAST({{ day }} AS DATE) - INTERVAL 29 DAY
+                     AND CAST({{ day }} AS DATE)
+      {% if region %}AND {{ filter('region', region) }}{% endif %}
+      GROUP BY date
+      ORDER BY date
+
+  day_by_region:
+    type: sql
+    sql: |
+      SELECT region, SUM(revenue) AS revenue, SUM(orders) AS orders
+      FROM sales
+      WHERE date = CAST({{ day }} AS DATE)
+      {% if region %}AND {{ filter('region', region) }}{% endif %}
+      GROUP BY region
+      ORDER BY revenue DESC
+
+  day_detail:
+    type: sql
+    sql: |
+      SELECT region, product, SUM(revenue) AS revenue, SUM(orders) AS orders
+      FROM sales
+      WHERE date = CAST({{ day }} AS DATE)
+      {% if region %}AND {{ filter('region', region) }}{% endif %}
+      GROUP BY region, product
+      ORDER BY region, product
+
+charts:
+  revenue_kpi:
+    type: kpi
+    query: day_kpi
+    label: Revenue
+    value: revenue
+    style:
+      value:
+        format: currency_whole
+
+  orders_kpi:
+    type: kpi
+    query: day_kpi
+    label: Orders
+    value: orders
+    style:
+      value:
+        format: integer
+
+  avg_order_kpi:
+    type: kpi
+    query: day_kpi
+    label: Average order
+    value: avg_order
+    style:
+      value:
+        format: currency_whole
+
+  revenue_trend:
+    type: line
+    query: trend
+    title: Revenue, trailing 30 days
+    x: date
+    y: revenue
+    style:
+      number_format: currency
+
+  region_breakdown:
+    type: bar
+    query: day_by_region
+    title: Revenue by region
+    x: region
+    y: revenue
+    style:
+      number_format: currency
+
+  detail_table:
+    type: table
+    query: day_detail
+    title: Detail by region and product
+    style:
+      columns:
+        revenue:
+          format: currency_whole
+        orders:
+          format: integer
+
+rows:
+  - text: |
+      Report date: **{{ day }}** · Region: **{{ region or 'All' }}**
+  - cols: [revenue_kpi, orders_kpi, avg_order_kpi]
+  - cols: [revenue_trend, region_breakdown]
+  - detail_table
