@@ -11,3 +11,34 @@ render:
   # Shared dct query-result cache (L1). All renders serialize on it
   # (DuckDB single-writer), which dct-hub's render lock enforces.
   query_cache: .hub/query-cache.duckdb
+
+# Access control — disabled for the local dev loop. To enable, set
+# auth.enabled: true and fill in your Keycloak realm. Boards redirect
+# unauthenticated browsers to SSO; API callers use Bearer service tokens.
+#
+# auth:
+#   enabled: true
+#   session_secret: ${DCT_HUB_SESSION_SECRET}   # any long random string
+#   session_https_only: true                     # set false for http dev
+#   oidc:
+#     issuer: https://keycloak.corp.internal/realms/data
+#     client_id: dct-hub
+#     client_secret: ${KEYCLOAK_CLIENT_SECRET}
+#     groups_claim: groups                       # realm role/group mapper
+#   service_tokens:
+#     - token: ${DCT_HUB_CI_TOKEN}
+#       name: ci
+#       groups: [data-ops]
+#
+# access:
+#   roles:                                       # capability sets (defaults shown)
+#     viewer:   [view]
+#     operator: [view, refresh]
+#     admin:    [view, refresh, manage]
+#   grants:
+#     # Most specific path wins; same-pattern grants union. No match = deny.
+#     - path: "*"            role: viewer   groups: [data]
+#     - path: "*"            role: operator groups: [data-ops]
+#     - path: finance/*      role: operator groups: [finance]
+#     - path: restricted/*   role: viewer   groups: [execs]
+#     - path: exec/board     role: admin    users: [ceo@corp.com]

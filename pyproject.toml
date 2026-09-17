@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dct-hub"
-version = "0.1.0"
+version = "0.2.0"
 description = "On-demand rendering, snapshot cache, access control and catalog UI for dbt Charts (dct)"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,6 +12,9 @@ dependencies = [
     "uvicorn>=0.30",
     "pydantic>=2.9",
     "pyyaml>=6.0.2",
+    "httpx>=0.27",
+    "joserfc>=1.0",
+    "itsdangerous>=2.2",
 ]
 
 [project.optional-dependencies]

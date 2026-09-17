@@ -5,6 +5,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from .auth.config import AccessConfig, AuthConfig
+
 
 class StorageConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -29,6 +31,8 @@ class Config(BaseModel):
     dct_bin: str = "dct"
     storage: StorageConfig = Field(default_factory=StorageConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+    access: AccessConfig = Field(default_factory=AccessConfig)
 
     @property
     def charts_root(self) -> Path:

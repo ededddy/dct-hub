@@ -1,14 +1,24 @@
-"""FastAPI surface: render triggers, render metadata, board catalog, artifact serving."""
+"""FastAPI surface: render triggers, render metadata, board catalog, artifact serving.
+
+When auth is enabled, every route is behind the access policy: `view` to see a
+board or its artifacts, `refresh` to trigger warehouse queries (renders,
+including render-on-miss board views). Browser flows get redirected to the
+OIDC login; API callers get 401/403 JSON.
+"""
 
 import asyncio
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.sessions import SessionMiddleware
 
+from .auth.access import AccessPolicy, Forbidden, Unauthenticated, require
+from .auth.identity import Identity, resolve_identity
+from .auth.oidc import OidcClient, register_auth_routes
 from .boards import (
     BoardNotFoundError,
     InvalidBoardRef,
@@ -71,20 +81,40 @@ class RenderService:
         except BoardNotFoundError:
             raise HTTPException(status_code=404, detail=f"board not found: {board_ref}")
 
+    def _normalize(self, board_ref: str) -> str:
+        try:
+            return normalize_board(board_ref)
+        except InvalidBoardRef as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    async def _key(self, board: str, board_file: Path, variables: dict[str, str], fmt: str) -> tuple[str, str]:
+        fingerprint = board_fingerprint(self.config.charts_root, board_file, self.config.project_dir / "dbt_charts.yml")
+        dct_version = await self.dct.version()
+        return artifact_key(board, variables, fingerprint, fmt, dct_version), dct_version
+
+    def _usable(self, record: RenderRecord | None) -> RenderRecord | None:
+        if record and record.status == "ok" and Path(record.artifact_path).exists():
+            return record
+        return None
+
+    async def peek(self, board_ref: str, variables: dict[str, Any], fmt: str) -> RenderRecord | None:
+        board, board_file = self._resolve(board_ref)
+        variables = {k: str(v) for k, v in variables.items()}
+        key, _ = await self._key(board, board_file, variables, fmt)
+        return self._usable(self.store.get(key))
+
     async def ensure_artifact(self, board_ref: str, variables: dict[str, Any], fmt: str, force: bool = False) -> tuple[RenderRecord, bool]:
         board, board_file = self._resolve(board_ref)
         variables = {k: str(v) for k, v in variables.items()}
-        fingerprint = board_fingerprint(self.config.charts_root, board_file, self.config.project_dir / "dbt_charts.yml")
-        dct_version = await self.dct.version()
-        key = artifact_key(board, variables, fingerprint, fmt, dct_version)
+        key, dct_version = await self._key(board, board_file, variables, fmt)
 
-        cached = self.store.get(key)
-        if not force and cached and cached.status == "ok" and Path(cached.artifact_path).exists():
+        cached = self._usable(self.store.get(key))
+        if not force and cached:
             return cached, False
 
         async with self.lock:
-            existing = self.store.get(key)
-            if not force and existing and existing.status == "ok" and Path(existing.artifact_path).exists():
+            existing = self._usable(self.store.get(key))
+            if not force and existing:
                 return existing, False
 
             output = self.store.new_artifact_path(board, key, fmt)
@@ -130,25 +160,78 @@ def _render_response(record: RenderRecord, cached: bool) -> RenderResponse:
     )
 
 
-def create_app(config: Config) -> FastAPI:
-    app = FastAPI(title="dct-hub", version="0.1.0")
+def create_app(config: Config, oidc_http=None) -> FastAPI:
+    auth_on = config.auth.enabled
+    app = FastAPI(
+        title="dct-hub",
+        version="0.2.0",
+        docs_url=None if auth_on else "/docs",
+        redoc_url=None if auth_on else "/redoc",
+        openapi_url=None if auth_on else "/openapi.json",
+    )
     service = RenderService(config)
     app.state.service = service
+    app.state.auth_config = config.auth
+    app.state.policy = AccessPolicy(config.access) if auth_on else None
+
+    if auth_on:
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=config.auth.session_secret,
+            https_only=config.auth.session_https_only,
+            max_age=config.auth.session_max_age_s,
+            same_site="lax",
+        )
+        if config.auth.oidc is not None:
+            oidc = OidcClient(config.auth.oidc, http=oidc_http)
+            app.state.oidc = oidc
+            register_auth_routes(app, oidc, config.auth.oidc.groups_claim)
+        else:
+
+            @app.get("/auth/login", include_in_schema=False)
+            async def login_unavailable() -> None:
+                raise HTTPException(status_code=400, detail="OIDC not configured; authenticate with a Bearer token")
+
+    def identity_of(request: Request) -> Identity | None:
+        return resolve_identity(request, config.auth)
+
+    def authorize(request: Request, capability: str, board: str) -> Identity | None:
+        identity = identity_of(request)
+        require(app.state.policy, identity, capability, board)
+        return identity
+
+    @app.exception_handler(Unauthenticated)
+    async def unauthenticated_handler(request: Request, exc: Unauthenticated):
+        if request.url.path.startswith("/b/"):
+            next_url = request.url.path
+            if request.url.query:
+                next_url += "?" + request.url.query
+            return RedirectResponse(f"/auth/login?next={quote(next_url)}")
+        return JSONResponse({"detail": exc.detail}, status_code=401)
+
+    @app.exception_handler(Forbidden)
+    async def forbidden_handler(request: Request, exc: Forbidden):
+        return JSONResponse({"detail": exc.detail}, status_code=403)
 
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok"}
 
     @app.post("/api/renders", response_model=RenderResponse)
-    async def trigger_render(request: RenderRequest) -> RenderResponse:
+    async def trigger_render(request: RenderRequest, raw: Request) -> RenderResponse:
+        authorize(raw, "refresh", service._normalize(request.board))
         record, created = await service.ensure_artifact(request.board, request.vars, request.format, request.force)
         return _render_response(record, cached=not created)
 
     @app.get("/api/renders/{key}")
-    async def render_status(key: str) -> dict:
+    async def render_status(key: str, request: Request) -> dict:
+        identity = identity_of(request)
+        if app.state.policy is not None and identity is None:
+            raise Unauthenticated()
         record = service.store.get(key)
         if record is None:
             raise HTTPException(status_code=404, detail=f"unknown render key: {key}")
+        require(app.state.policy, identity, "view", record.board)
         return {
             "key": record.key,
             "board": record.board,
@@ -162,18 +245,30 @@ def create_app(config: Config) -> FastAPI:
         }
 
     @app.get("/api/renders/{key}/artifact")
-    async def render_artifact(key: str) -> FileResponse:
+    async def render_artifact(key: str, request: Request) -> FileResponse:
+        identity = identity_of(request)
+        if app.state.policy is not None and identity is None:
+            raise Unauthenticated()
         record = service.store.get(key)
         if record is None or record.status != "ok" or not Path(record.artifact_path).exists():
             raise HTTPException(status_code=404, detail=f"no artifact for render key: {key}")
+        require(app.state.policy, identity, "view", record.board)
         return FileResponse(record.artifact_path, media_type=MEDIA_TYPES.get(record.format, "application/octet-stream"))
 
     @app.get("/api/boards")
-    async def boards() -> list[dict]:
-        return [vars(info) for info in list_boards(service.config.charts_root)]
+    async def boards(request: Request) -> list[dict]:
+        identity = identity_of(request)
+        if app.state.policy is not None and identity is None:
+            raise Unauthenticated()
+        all_boards = list_boards(service.config.charts_root)
+        if app.state.policy is not None:
+            all_boards = [b for b in all_boards if app.state.policy.allows(identity, "view", b.board)]
+        return [vars(info) for info in all_boards]
 
     @app.get("/api/boards/{board:path}")
-    async def board_detail(board: str) -> dict:
+    async def board_detail(board: str, request: Request) -> dict:
+        resolved = service._normalize(board)
+        authorize(request, "view", resolved)
         _, board_file = service._resolve(board)
         try:
             return await service.dct.describe(board_file)
@@ -182,7 +277,12 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/b/{board:path}")
     async def view_board(board: str, request: Request) -> FileResponse:
+        board = service._normalize(board)
         variables = dict(request.query_params)
+        authorize(request, "view", board)
+        existing = await service.peek(board, variables, "html")
+        if existing is None:
+            authorize(request, "refresh", board)
         record, _ = await service.ensure_artifact(board, variables, "html")
         return FileResponse(
             record.artifact_path,
