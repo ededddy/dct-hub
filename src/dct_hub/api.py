@@ -1,17 +1,21 @@
-"""FastAPI surface: render triggers, render metadata, board catalog, artifact serving.
+"""FastAPI surface: render triggers, render metadata, jobs, board catalog, artifact serving.
 
 When auth is enabled, every route is behind the access policy: `view` to see a
 board or its artifacts, `refresh` to trigger warehouse queries (renders,
 including render-on-miss board views). Browser flows get redirected to the
 OIDC login; API callers get 401/403 JSON.
+
+Renders run through an async queue (`POST /api/renders` returns 202 with a job
+id; `wait: true` blocks until done). Freshness policy decides when existing
+artifacts are served: frozen (all date vars in the past → never re-render),
+fresh (within TTL), stale (served while a background refresh is enqueued).
 """
 
-import asyncio
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
@@ -28,8 +32,10 @@ from .boards import (
 )
 from .cachekey import artifact_key, board_fingerprint
 from .config import Config
-from .dct import Dct, DctError, RenderTimeout
-from .store import ArtifactStore, RenderRecord, utcnow_iso
+from .dct import Dct, DctError
+from .policy import CachePolicy, Freshness
+from .queue import RenderQueue
+from .store import ArtifactStore, JobRecord, RenderRecord, utcnow_iso
 
 MEDIA_TYPES = {
     "html": "text/html",
@@ -46,6 +52,7 @@ class RenderRequest(BaseModel):
     vars: dict[str, Any] = Field(default_factory=dict)
     format: str = "html"
     force: bool = False
+    wait: bool = False
 
 
 class RenderResponse(BaseModel):
@@ -53,9 +60,12 @@ class RenderResponse(BaseModel):
     board: str
     vars: dict[str, str]
     format: str
+    outcome: str  # "cached" | "queued" | "running" | "done"
     cached: bool
-    duration_ms: int | None
-    rendered_at: str
+    stale: bool = False
+    job_id: str | None = None
+    duration_ms: int | None = None
+    rendered_at: str | None = None
     url: str
     artifact_url: str
 
@@ -70,7 +80,9 @@ class RenderService:
             timeout_s=config.render.timeout_s,
             query_cache=config.render.query_cache,
         )
-        self.lock = asyncio.Lock()
+        self.policy = CachePolicy(config.policy, describe=lambda board_file: self.dct.describe(board_file))
+        concurrency = 1 if config.render.query_cache else config.policy.max_concurrent
+        self.queue = RenderQueue(self.store, concurrency, self.execute_render)
 
     def _resolve(self, board_ref: str) -> tuple[str, Path]:
         try:
@@ -87,84 +99,89 @@ class RenderService:
         except InvalidBoardRef as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-    async def _key(self, board: str, board_file: Path, variables: dict[str, str], fmt: str) -> tuple[str, str]:
+    async def _key(self, board: str, board_file: Path, variables: dict[str, str], fmt: str) -> tuple[str, str, str]:
         fingerprint = board_fingerprint(self.config.charts_root, board_file, self.config.project_dir / "dbt_charts.yml")
         dct_version = await self.dct.version()
-        return artifact_key(board, variables, fingerprint, fmt, dct_version), dct_version
+        return artifact_key(board, variables, fingerprint, fmt, dct_version), dct_version, fingerprint
 
     def _usable(self, record: RenderRecord | None) -> RenderRecord | None:
         if record and record.status == "ok" and Path(record.artifact_path).exists():
             return record
         return None
 
-    async def peek(self, board_ref: str, variables: dict[str, Any], fmt: str) -> RenderRecord | None:
-        board, board_file = self._resolve(board_ref)
+    async def lookup(self, board: str, variables: dict[str, Any], fmt: str) -> tuple[RenderRecord | None, str, Path, str, dict[str, str]]:
         variables = {k: str(v) for k, v in variables.items()}
-        key, _ = await self._key(board, board_file, variables, fmt)
-        return self._usable(self.store.get(key))
+        _, board_file = self._resolve(board)
+        key, _, fingerprint = await self._key(board, board_file, variables, fmt)
+        return self._usable(self.store.get(key)), key, board_file, fingerprint, variables
 
-    async def ensure_artifact(self, board_ref: str, variables: dict[str, Any], fmt: str, force: bool = False) -> tuple[RenderRecord, bool]:
-        board, board_file = self._resolve(board_ref)
-        variables = {k: str(v) for k, v in variables.items()}
-        key, dct_version = await self._key(board, board_file, variables, fmt)
-
-        cached = self._usable(self.store.get(key))
-        if not force and cached:
-            return cached, False
-
-        async with self.lock:
-            existing = self._usable(self.store.get(key))
-            if not force and existing:
-                return existing, False
-
-            output = self.store.new_artifact_path(board, key, fmt)
-            try:
-                result = await self.dct.render(board_file, variables, output, fmt)
-                record = RenderRecord(
-                    key=key,
-                    board=board,
-                    variables=variables,
-                    format=fmt,
-                    artifact_path=str(output),
-                    status="ok",
-                    error=None,
-                    duration_ms=result.duration_ms,
-                    rendered_at=utcnow_iso(),
-                    dct_version=dct_version,
-                )
-            except RenderTimeout as exc:
-                raise HTTPException(status_code=504, detail=str(exc))
-            except DctError as exc:
-                self.store.put(
-                    RenderRecord(key, board, variables, fmt, str(output), "error", exc.stderr[-2000:], None, utcnow_iso(), dct_version)
-                )
-                raise HTTPException(status_code=502, detail=f"dct render failed: {exc.stderr[-1000:]}")
-            self.store.put(record)
-            return record, True
+    async def execute_render(self, job: JobRecord) -> RenderRecord:
+        # Only successful renders enter the renders table: a failed refresh must
+        # never displace the last good artifact. Failures are recorded on the job.
+        _, board_file = self._resolve(job.board)
+        dct_version = await self.dct.version()
+        output = self.store.new_artifact_path(job.board, job.key, job.format)
+        result = await self.dct.render(board_file, job.variables, output, job.format)
+        record = RenderRecord(
+            key=job.key,
+            board=job.board,
+            variables=job.variables,
+            format=job.format,
+            artifact_path=str(output),
+            status="ok",
+            error=None,
+            duration_ms=result.duration_ms,
+            rendered_at=utcnow_iso(),
+            dct_version=dct_version,
+        )
+        self.store.put(record)
+        return record
 
 
-def _render_response(record: RenderRecord, cached: bool) -> RenderResponse:
-    url = f"/b/{record.board}"
-    if record.variables:
-        url = f"{url}?{urlencode(record.variables)}"
+def _render_response(record: RenderRecord | None, key: str, board: str, variables: dict[str, str], fmt: str,
+                     outcome: str, stale: bool = False, job: JobRecord | None = None) -> RenderResponse:
+    url = f"/b/{board}"
+    if variables:
+        url = f"{url}?{urlencode(variables)}"
     return RenderResponse(
-        key=record.key,
-        board=record.board,
-        vars=record.variables,
-        format=record.format,
-        cached=cached,
-        duration_ms=record.duration_ms,
-        rendered_at=record.rendered_at,
+        key=key,
+        board=board,
+        vars=variables,
+        format=fmt,
+        outcome=outcome,
+        cached=outcome == "cached",
+        stale=stale,
+        job_id=job.id if job else None,
+        duration_ms=(record.duration_ms if record else None),
+        rendered_at=(record.rendered_at if record else None),
         url=url,
-        artifact_url=f"/api/renders/{record.key}/artifact",
+        artifact_url=f"/api/renders/{key}/artifact",
     )
+
+
+def _job_json(job: JobRecord) -> dict:
+    return {
+        "id": job.id,
+        "key": job.key,
+        "board": job.board,
+        "vars": job.variables,
+        "format": job.format,
+        "status": job.status,
+        "mode": job.mode,
+        "error": job.error,
+        "requested_by": job.requested_by,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "duration_ms": job.duration_ms,
+    }
 
 
 def create_app(config: Config, oidc_http=None) -> FastAPI:
     auth_on = config.auth.enabled
     app = FastAPI(
         title="dct-hub",
-        version="0.2.0",
+        version="0.3.0",
         docs_url=None if auth_on else "/docs",
         redoc_url=None if auth_on else "/redoc",
         openapi_url=None if auth_on else "/openapi.json",
@@ -218,10 +235,32 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/api/renders", response_model=RenderResponse)
-    async def trigger_render(request: RenderRequest, raw: Request) -> RenderResponse:
-        authorize(raw, "refresh", service._normalize(request.board))
-        record, created = await service.ensure_artifact(request.board, request.vars, request.format, request.force)
-        return _render_response(record, cached=not created)
+    async def trigger_render(request: RenderRequest, raw: Request, response: Response) -> RenderResponse:
+        board = service._normalize(request.board)
+        identity = authorize(raw, "refresh", board)
+        record, key, board_file, fingerprint, variables = await service.lookup(board, request.vars, request.format)
+
+        if record is not None and not request.force:
+            freshness = await service.policy.freshness(board_file, fingerprint, variables, record)
+            if freshness in (Freshness.FROZEN, Freshness.FRESH):
+                return _render_response(record, key, board, variables, request.format, "cached")
+            if service.policy.within_min_interval(service.store.last_activity(key)):
+                return _render_response(record, key, board, variables, request.format, "cached", stale=True)
+
+        mode = "force" if request.force else "auto"
+        job, _ = await service.queue.submit(
+            key=key, board=board, variables=variables, fmt=request.format,
+            mode=mode, requested_by=identity.sub if identity else "anon",
+        )
+        if request.wait:
+            job = await service.queue.wait(job.id, timeout_s=config.render.timeout_s + 15)
+            if job and job.status == "done":
+                record = service.store.get(key)
+                return _render_response(record, key, board, variables, request.format, "done", job=job)
+            if job and job.status == "error":
+                raise HTTPException(status_code=502, detail=f"dct render failed: {(job.error or '')[-1000:]}")
+        response.status_code = 202
+        return _render_response(record, key, board, variables, request.format, job.status if job else "queued", job=job)
 
     @app.get("/api/renders/{key}")
     async def render_status(key: str, request: Request) -> dict:
@@ -255,6 +294,27 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         require(app.state.policy, identity, "view", record.board)
         return FileResponse(record.artifact_path, media_type=MEDIA_TYPES.get(record.format, "application/octet-stream"))
 
+    @app.get("/api/jobs")
+    async def jobs(request: Request, limit: int = 50) -> list[dict]:
+        identity = identity_of(request)
+        if app.state.policy is not None and identity is None:
+            raise Unauthenticated()
+        all_jobs = service.store.list_jobs(limit)
+        if app.state.policy is not None:
+            all_jobs = [j for j in all_jobs if app.state.policy.allows(identity, "view", j.board)]
+        return [_job_json(j) for j in all_jobs]
+
+    @app.get("/api/jobs/{job_id}")
+    async def job_status(job_id: str, request: Request) -> dict:
+        identity = identity_of(request)
+        if app.state.policy is not None and identity is None:
+            raise Unauthenticated()
+        job = service.store.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
+        require(app.state.policy, identity, "view", job.board)
+        return _job_json(job)
+
     @app.get("/api/boards")
     async def boards(request: Request) -> list[dict]:
         identity = identity_of(request)
@@ -278,12 +338,34 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
     @app.get("/b/{board:path}")
     async def view_board(board: str, request: Request) -> FileResponse:
         board = service._normalize(board)
-        variables = dict(request.query_params)
-        authorize(request, "view", board)
-        existing = await service.peek(board, variables, "html")
-        if existing is None:
+        variables_qs = dict(request.query_params)
+        identity = authorize(request, "view", board)
+        record, key, board_file, fingerprint, variables = await service.lookup(board, variables_qs, "html")
+
+        if record is None:
             authorize(request, "refresh", board)
-        record, _ = await service.ensure_artifact(board, variables, "html")
+            job, _ = await service.queue.submit(
+                key=key, board=board, variables=variables, fmt="html",
+                mode="auto", requested_by=identity.sub if identity else "anon",
+            )
+            job = await service.queue.wait(job.id, timeout_s=config.render.timeout_s + 15)
+            if job is not None and job.status == "error":
+                raise HTTPException(status_code=502, detail=f"dct render failed: {(job.error or '')[-1000:]}")
+            record = service._usable(service.store.get(key))
+            if record is None:
+                raise HTTPException(status_code=504, detail="render still in progress; retry shortly")
+        else:
+            freshness = await service.policy.freshness(board_file, fingerprint, variables, record)
+            if (
+                freshness == Freshness.STALE
+                and not service.policy.within_min_interval(service.store.last_activity(key))
+                and service.store.active_job_for_key(key) is None
+            ):
+                await service.queue.submit(
+                    key=key, board=board, variables=variables, fmt="html",
+                    mode="auto", requested_by=identity.sub if identity else "anon",
+                )
+
         return FileResponse(
             record.artifact_path,
             media_type="text/html",

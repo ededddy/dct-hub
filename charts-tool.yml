@@ -9,8 +9,16 @@ render:
   format: html
   timeout_s: 120
   # Shared dct query-result cache (L1). All renders serialize on it
-  # (DuckDB single-writer), which dct-hub's render lock enforces.
+  # (DuckDB single-writer), which dct-hub enforces by dropping the
+  # render worker pool to a single worker when this is set.
   query_cache: .hub/query-cache.duckdb
+
+# Freshness policy for rendered artifacts (M3):
+# policy:
+#   default_ttl_s: 3600      # serve cached artifacts younger than this
+#   frozen_date_vars: true   # boards with all date vars < today never re-render
+#   min_interval_s: 300      # min seconds between renders of one artifact
+#   max_concurrent: 2        # render workers (forced to 1 with query_cache)
 
 # Access control — disabled for the local dev loop. To enable, set
 # auth.enabled: true and fill in your Keycloak realm. Boards redirect

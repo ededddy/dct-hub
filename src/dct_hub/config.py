@@ -22,6 +22,21 @@ class RenderConfig(BaseModel):
     query_cache: Path | None = None
 
 
+class PolicyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Artifacts younger than this are served without re-rendering.
+    default_ttl_s: int = 3600
+    # When true, boards whose date variables all point at past dates are
+    # immutable: rendered once, served forever (unless force-rendered).
+    frozen_date_vars: bool = True
+    # Minimum seconds between renders of the same artifact (force excepted).
+    min_interval_s: int = 300
+    # Parallel render workers. Forced to 1 when a persistent query cache is
+    # configured (DuckDB single-writer limit).
+    max_concurrent: int = 2
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -31,6 +46,7 @@ class Config(BaseModel):
     dct_bin: str = "dct"
     storage: StorageConfig = Field(default_factory=StorageConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     access: AccessConfig = Field(default_factory=AccessConfig)
 

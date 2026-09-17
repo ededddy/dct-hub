@@ -34,8 +34,41 @@ CREATE TABLE IF NOT EXISTS renders (
     duration_ms INTEGER,
     rendered_at TEXT NOT NULL,
     dct_version TEXT NOT NULL
-)
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
+    board TEXT NOT NULL,
+    vars_json TEXT NOT NULL,
+    format TEXT NOT NULL,
+    status TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    error TEXT,
+    requested_by TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS jobs_key_status ON jobs (key, status);
 """
+
+
+@dataclass
+class JobRecord:
+    id: str
+    key: str
+    board: str
+    variables: dict[str, str]
+    format: str
+    status: str  # "queued" | "running" | "done" | "error" | "interrupted"
+    mode: str  # "auto" | "force"
+    error: str | None
+    requested_by: str
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    duration_ms: int | None
 
 
 class ArtifactStore:
@@ -46,7 +79,7 @@ class ArtifactStore:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(root / "meta.db", check_same_thread=False)
         with self._db:
-            self._db.execute(_SCHEMA)
+            self._db.executescript(_SCHEMA)
 
     def new_artifact_path(self, board: str, key: str, fmt: str) -> Path:
         path = self.artifacts_dir / board / f"{key}.{fmt}"
@@ -90,6 +123,97 @@ class ArtifactStore:
             duration_ms=row[7],
             rendered_at=row[8],
             dct_version=row[9],
+        )
+
+    # --- render jobs ---
+
+    def create_job(self, job: JobRecord) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job.id,
+                    job.key,
+                    job.board,
+                    json.dumps(job.variables),
+                    job.format,
+                    job.status,
+                    job.mode,
+                    job.error,
+                    job.requested_by,
+                    job.created_at,
+                    job.started_at,
+                    job.finished_at,
+                    job.duration_ms,
+                ),
+            )
+
+    def get_job(self, job_id: str) -> JobRecord | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return self._to_job(row) if row else None
+
+    def active_job_for_key(self, key: str) -> JobRecord | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM jobs WHERE key = ? AND status IN ('queued', 'running') ORDER BY created_at LIMIT 1",
+                (key,),
+            ).fetchone()
+        return self._to_job(row) if row else None
+
+    def claim_next_job(self) -> JobRecord | None:
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            self._db.execute(
+                "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'",
+                (utcnow_iso(), row[0]),
+            )
+            return self._to_job(row)
+
+    def finish_job(self, job_id: str, status: str, error: str | None = None, duration_ms: int | None = None) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE jobs SET status = ?, error = ?, duration_ms = ?, finished_at = ? WHERE id = ?",
+                (status, error, duration_ms, utcnow_iso(), job_id),
+            )
+
+    def interrupt_active_jobs(self) -> int:
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                "UPDATE jobs SET status = 'interrupted', finished_at = ? WHERE status IN ('queued', 'running')",
+                (utcnow_iso(),),
+            )
+            return cursor.rowcount
+
+    def list_jobs(self, limit: int = 50) -> list[JobRecord]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)).fetchall()
+        return [self._to_job(row) for row in rows]
+
+    def last_activity(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT MAX(created_at) FROM jobs WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def _to_job(self, row: tuple) -> JobRecord:
+        return JobRecord(
+            id=row[0],
+            key=row[1],
+            board=row[2],
+            variables=json.loads(row[3]),
+            format=row[4],
+            status=row[5],
+            mode=row[6],
+            error=row[7],
+            requested_by=row[8],
+            created_at=row[9],
+            started_at=row[10],
+            finished_at=row[11],
+            duration_ms=row[12],
         )
 
 

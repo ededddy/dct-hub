@@ -113,7 +113,11 @@ def test_bad_bearer_rejected(env):
 
 def test_service_token_can_refresh(env):
     client, fake, _ = env
-    resp = client.post("/api/renders", json={"board": "sales_daily"}, headers={"Authorization": "Bearer ci-token"})
+    resp = client.post(
+        "/api/renders",
+        json={"board": "sales_daily", "wait": True},
+        headers={"Authorization": "Bearer ci-token"},
+    )
     assert resp.status_code == 200
     assert len(fake.renders) == 1
     artifact = client.get(f"/api/renders/{resp.json()['key']}/artifact", headers={"Authorization": "Bearer ci-token"})
@@ -122,7 +126,11 @@ def test_service_token_can_refresh(env):
 
 def test_service_token_from_env(env):
     client, fake, _ = env
-    resp = client.post("/api/renders", json={"board": "sales_daily"}, headers={"Authorization": "Bearer env-token"})
+    resp = client.post(
+        "/api/renders",
+        json={"board": "sales_daily", "wait": True},
+        headers={"Authorization": "Bearer env-token"},
+    )
     assert resp.status_code == 200
 
 
@@ -130,7 +138,7 @@ def test_oidc_login_then_grants_enforced(env):
     client, fake, idp = env
 
     # Pre-render as CI so the artifact exists for the viewer (viewers can't render-on-miss).
-    client.post("/api/renders", json={"board": "sales_daily"}, headers={"Authorization": "Bearer ci-token"})
+    client.post("/api/renders", json={"board": "sales_daily", "wait": True}, headers={"Authorization": "Bearer ci-token"})
     assert len(fake.renders) == 1
 
     idp.user = {"sub": "u-bob", "name": "Bob", "email": "bob@corp.test", "groups": ["data"]}
@@ -161,7 +169,7 @@ def test_finance_operator_can_render_finance(env):
     idp.user = {"sub": "u-cara", "name": "Cara", "email": "cara@corp.test", "groups": ["finance"]}
     login(client, idp)
 
-    assert client.post("/api/renders", json={"board": "finance/q4"}).status_code == 200
+    assert client.post("/api/renders", json={"board": "finance/q4", "wait": True}).status_code == 200
     assert len(fake.renders) == 1
     assert client.post("/api/renders", json={"board": "sales_daily"}).status_code == 403
     assert client.get("/api/boards").json() == [{"board": "finance/q4", "notes": "", "title": "Q4 finance"}]

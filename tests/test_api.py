@@ -40,8 +40,9 @@ def client(tmp_path):
 def test_render_then_cached(client):
     client, fake = client
 
-    first = client.post("/api/renders", json={"board": "sales_daily", "vars": {"region": "West"}})
+    first = client.post("/api/renders", json={"board": "sales_daily", "vars": {"region": "West"}, "wait": True})
     assert first.status_code == 200
+    assert first.json()["outcome"] == "done"
     assert first.json()["cached"] is False
     assert first.json()["url"] == "/b/sales_daily?region=West"
     assert len(fake.renders) == 1
@@ -91,8 +92,9 @@ def test_e2e_real_dct_render():
     config = Config(project_dir=root / "sample_project", storage={"dir": state_dir})
     try:
         with TestClient(create_app(config)) as client:
-            resp = client.post("/api/renders", json={"board": "sales_daily", "vars": {"day": "2026-09-16"}})
+            resp = client.post("/api/renders", json={"board": "sales_daily", "vars": {"day": "2026-09-16"}, "wait": True})
             assert resp.status_code == 200, resp.text
+            assert resp.json()["outcome"] == "done"
             assert resp.json()["cached"] is False
 
             cached = client.post("/api/renders", json={"board": "sales_daily", "vars": {"day": "2026-09-16"}})
