@@ -59,6 +59,31 @@ Frozen snapshots are never pruned. Artifacts that can't be classified (e.g.
 `dct describe` failing) are always kept — pruning fails safe. Renders whose
 board was deleted from the repo age out normally.
 
+## `warm:` — deploy-time cache warming
+
+Boards rendered by `POST /api/warm` (the deploy-pipeline warm step; see
+`docs/api.md`). Auto semantics: changed boards render, unchanged boards
+report `cached` — no `force`, so warming costs nothing on no-op deploys.
+
+```yaml
+warm:
+  boards:
+    - sales_daily                 # warmed with declared variable defaults
+    - board: exec/overview        # mapping form: extra explicit combos
+      vars:
+        - {region: East}
+        - {region: West}
+```
+
+| Key | Default | Purpose |
+|---|---|---|
+| `boards` | `[]` | Board refs (string form) or `{board, vars}` entries |
+| `vars` | `[{}]` | Variable combos to warm per board; `{}` = the board's declared defaults |
+
+Warming runs warehouse queries: the calling identity needs `refresh` on each
+board, and submissions count against `policy.max_renders_per_minute` — size
+the cap with the warm list in mind.
+
 ## `auth:`
 
 | Key | Default | Purpose |

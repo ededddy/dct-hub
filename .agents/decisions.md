@@ -119,6 +119,24 @@ D10); resets on restart, acceptable for an abuse cap. Stale-while-revalidate
 over the limit skips the refresh and serves stale rather than failing the
 page. Default-off so existing cron/Airflow automation is unaffected.
 
+### D17. Deploy-time warming via config + `POST /api/warm`, auto semantics
+The warm list is declared in `charts-tool.yml` (`warm.boards`) and executed by
+one authenticated pipeline call after a deploy or dct upgrade. Warming uses
+auto (non-force) semantics: a board edit changes the source fingerprint, hence
+the artifact key, so changed boards miss the cache on their own while
+unchanged boards report `cached` and cost no warehouse query. Per-board
+failures aggregate into HTTP 502 so `curl -f` fails the pipeline; a render
+still going past the wait window reports `running` (with its job id) without
+failing — the artifact lands on its own.
+**Why:** the operator's config bounds warehouse cost (only listed boards and
+combos render), and server-side execution reuses the queue, single-flight,
+grants, and rate limiting — no client logic to version across consumers.
+**Rejected:** force-rendering the warm list (re-queries unchanged boards on
+every deploy); a repo-shipped CI script calling `/api/renders` per board
+(error aggregation and auth duplicated in every consumer); filesystem
+auto-watch (surprise warehouse load on mass edits — the pipeline call is
+explicit).
+
 ## Packaging (air-gapped)
 
 ### D12. Hash verification at vendor time; version resolution at image build

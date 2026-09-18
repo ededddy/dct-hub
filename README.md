@@ -10,6 +10,10 @@ air-gapped packaging + retention (M5).
 
 ## Deployment (air-gapped)
 
+For the end-to-end operating model — team responsibilities, CI/CD chaining,
+deploy-time warming, upgrades, and failure modes — see
+[docs/operations.md](docs/operations.md). This section covers the image build.
+
 On a networked machine, vendor the dependencies (locked with hashes; sdists
 pre-built to wheels), then build the image — no index access needed:
 
@@ -78,6 +82,10 @@ curl -X POST localhost:8080/api/renders \
 # outcome: cached | queued | running | done — "cached" means the existing
 # artifact was served (frozen or within TTL); "stale: true" marks a
 # rate-limited stale serve. force: true always re-renders.
+
+# Deploy-pipeline warm step: render the boards listed under `warm:` in
+# charts-tool.yml (unchanged boards return "cached"; any failure → 502).
+curl -X POST localhost:8080/api/warm -H 'content-type: application/json' -d '{"wait": true}'
 
 curl localhost:8080/api/jobs/<job_id>          # job status (queued/running/done/error)
 curl localhost:8080/api/jobs                   # recent jobs (view-filtered)

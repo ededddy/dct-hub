@@ -88,6 +88,25 @@ class RenderResponse(BaseModel):
     artifact_url: str
 
 
+class WarmRequest(BaseModel):
+    wait: bool = True
+
+
+class WarmResult(BaseModel):
+    board: str
+    vars: dict[str, str]
+    key: str | None = None
+    outcome: str  # "done" | "cached" | "queued" | "running" | "error"
+    job_id: str | None = None
+    duration_ms: int | None = None
+    error: str | None = None
+
+
+class WarmResponse(BaseModel):
+    ok: bool
+    results: list[WarmResult]
+
+
 class RenderService:
     def __init__(self, config: Config):
         self.config = config
@@ -202,6 +221,57 @@ class RenderService:
         )
         self.store.put(record)
         return record
+
+    async def warm_submit(self, board: str, variables: dict[str, Any], fmt: str, requested_by: str) -> WarmResult:
+        """Queue one board+combo render if missing or stale, for deploy-pipeline warming.
+
+        Auto (non-force) semantics: a deploy changes the fingerprint, hence the
+        key, so changed boards miss the cache on their own; unchanged boards
+        report `cached` and cost no warehouse query. Never raises — failures
+        are reported per entry so one bad board can't block the rest. Pair with
+        `warm_await`, after every entry is submitted, so the worker pool drains
+        the list concurrently.
+        """
+        try:
+            record, key, board_file, fingerprint, variables = await self.lookup(board, variables, fmt)
+        except HTTPException as exc:
+            return WarmResult(board=board, vars={k: str(v) for k, v in variables.items()}, outcome="error", error=str(exc.detail))
+        except DctError as exc:  # e.g. dct binary broken — per-entry error, not a request 500
+            detail = f"{exc}: {exc.stderr[-300:]}" if exc.stderr else str(exc)
+            return WarmResult(board=board, vars={k: str(v) for k, v in variables.items()}, outcome="error", error=detail)
+        try:
+            await self.validate_vars(board_file, variables)
+        except HTTPException as exc:
+            return WarmResult(board=board, vars=variables, key=key, outcome="error", error=str(exc.detail))
+
+        if record is not None:
+            freshness = await self.policy.freshness(board_file, fingerprint, variables, record)
+            if freshness in (Freshness.FROZEN, Freshness.FRESH):
+                return WarmResult(board=board, vars=variables, key=key, outcome="cached", duration_ms=record.duration_ms)
+            if self.policy.within_min_interval(self.store.last_activity(key)):
+                return WarmResult(board=board, vars=variables, key=key, outcome="cached", duration_ms=record.duration_ms)
+
+        if not self.rate_limiter.allow(requested_by):
+            return WarmResult(board=board, vars=variables, key=key, outcome="error", error="render rate limit exceeded; retry shortly")
+        job, _ = await self.queue.submit(
+            key=key, board=board, variables=variables, fmt=fmt, mode="auto", requested_by=requested_by,
+        )
+        return WarmResult(board=board, vars=variables, key=key, outcome="queued", job_id=job.id)
+
+    async def warm_await(self, result: WarmResult) -> WarmResult:
+        """Resolve a queued warm entry once its job leaves the queue (or the wait
+        window closes). Entries without a job (cached/error) pass through."""
+        if result.job_id is None:
+            return result
+        job = await self.queue.wait(result.job_id, timeout_s=self.config.render.timeout_s + 15)
+        if job is not None and job.status == "done":
+            record = self.store.get(result.key) if result.key else None
+            return result.model_copy(update={"outcome": "done", "duration_ms": record.duration_ms if record else None})
+        if job is not None and job.status == "error":
+            return result.model_copy(update={"outcome": "error", "error": (job.error or "")[-1000:]})
+        # Still going past the wait window: the artifact will land on its own;
+        # report the job so the pipeline can poll, but don't fail the warm.
+        return result.model_copy(update={"outcome": "running"})
 
 
 def _render_response(record: RenderRecord | None, key: str, board: str, variables: dict[str, str], fmt: str,
@@ -357,6 +427,46 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
                 raise HTTPException(status_code=502, detail=f"dct render failed: {(job.error or '')[-1000:]}")
         response.status_code = 202
         return _render_response(record, key, board, variables, request.format, job.status if job else "queued", job=job)
+
+    @app.post("/api/warm", response_model=WarmResponse)
+    async def warm(raw: Request, response: Response, body: WarmRequest | None = None) -> WarmResponse:
+        # Deploy-pipeline warm step: render every board+combo declared in the
+        # `warm:` config so no viewer pays a cold miss after a deploy or dct
+        # upgrade. Per-board failures aggregate into a 502 so `curl -f` turns
+        # the pipeline red while still warming everything else.
+        identity = identity_of(raw)
+        if app.state.policy is not None and identity is None:
+            raise Unauthenticated()
+        requested_by = identity.sub if identity else "anon"
+        wait = True if body is None else body.wait
+
+        async def warm_board(entry) -> list[WarmResult]:
+            try:
+                board = service._normalize(entry.board)
+            except HTTPException as exc:
+                return [WarmResult(board=entry.board, vars={}, outcome="error", error=str(exc.detail))]
+            try:
+                require(app.state.policy, identity, "refresh", board)
+            except Forbidden as exc:
+                return [WarmResult(board=board, vars={}, outcome="error", error=str(exc.detail))]
+            return [await service.warm_submit(board, v, config.render.format, requested_by) for v in entry.vars]
+
+        # Boards submit concurrently (each pays a dct describe subprocess in
+        # phase 1); gather preserves config order in the flattened results.
+        nested = await asyncio.gather(*(warm_board(e) for e in config.warm.boards))
+        results = [r for rs in nested for r in rs]
+
+        if wait:
+            # Everything is submitted already, so the worker pool drains the
+            # list concurrently — waiting here is observation, per entry.
+            results = [await service.warm_await(r) for r in results]
+
+        ok = all(r.outcome != "error" for r in results)
+        if not ok:
+            response.status_code = 502
+        elif not wait:
+            response.status_code = 202
+        return WarmResponse(ok=ok, results=results)
 
     @app.get("/api/renders/{key}")
     async def render_status(key: str, request: Request) -> dict:

@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from dct_hub.config import load_config
 
 
@@ -24,3 +27,33 @@ def test_defaults(tmp_path):
     assert config.dct_bin == "dct"
     assert config.render.format == "html"
     assert config.render.query_cache is None
+
+
+def test_warm_normalizes_string_entries(tmp_path):
+    config_file = tmp_path / "charts-tool.yml"
+    config_file.write_text(
+        "project_dir: .\n"
+        "warm:\n"
+        "  boards:\n"
+        "    - sales_daily\n"
+        "    - board: exec/overview\n"
+        "      vars:\n"
+        "        - {region: East}\n"
+    )
+    config = load_config(config_file)
+    assert [b.board for b in config.warm.boards] == ["sales_daily", "exec/overview"]
+    assert config.warm.boards[0].vars == [{}]
+    assert config.warm.boards[1].vars == [{"region": "East"}]
+
+
+def test_warm_defaults_off(tmp_path):
+    config_file = tmp_path / "charts-tool.yml"
+    config_file.write_text("project_dir: .\n")
+    assert load_config(config_file).warm.boards == []
+
+
+def test_warm_board_rejects_unknown_keys(tmp_path):
+    config_file = tmp_path / "charts-tool.yml"
+    config_file.write_text("project_dir: .\nwarm:\n  boards:\n    - {board: x, bogus: 1}\n")
+    with pytest.raises(ValidationError):
+        load_config(config_file)

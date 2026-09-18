@@ -1,7 +1,9 @@
 # Deployment guide (air-gapped)
 
 The image builds and runs with **no index/registry access at install time**:
-all Python packages come from wheels vendored ahead of time.
+all Python packages come from wheels vendored ahead of time. For how this
+fits into the wider CI/CD chain (board deploys, warming, upgrades), see
+[operations.md](operations.md).
 
 ## 1. Vendor (on a networked machine)
 
@@ -80,7 +82,10 @@ and health-checks `GET /healthz` via stdlib urllib (no curl in slim).
 - [ ] `retention.enabled: true` once comfortable — frozen snapshots are exempt,
       and unclassifiable artifacts are never pruned
 - [ ] Warehouse credentials via env/secrets, never in `charts-tool.yml`
-- [ ] Cron/Airflow hooks for intraday boards:
+- [ ] `warm.boards` lists the top boards; the deploy pipeline calls
+      `curl -f -X POST /api/warm` after each sync (and after dct upgrades) so
+      no viewer pays a cold miss. Intraday boards that must stay fresh between
+      views still want a schedule:
       `POST /api/renders {"board": "...", "vars": {"day": "<today>"}, "force": true, "wait": true}`
 
 ## Known limitation

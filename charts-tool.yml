@@ -27,6 +27,13 @@ render:
 #   max_per_board: 100       # keep newest N non-frozen artifacts per board
 #   sweep_interval_s: 3600
 
+# warm:                      # deploy-pipeline cache warming (POST /api/warm):
+#   boards:                  # one call after a deploy renders these so no
+#     - sales_daily          # viewer pays a cold miss. Auto semantics —
+#     - board: exec/overview # unchanged boards come back "cached" (no query).
+#       vars:                # extra combos beyond the declared defaults
+#         - {region: East}
+
 # Access control — disabled for the local dev loop. To enable, set
 # auth.enabled: true and fill in your Keycloak realm. Boards redirect
 # unauthenticated browsers to SSO; API callers use Bearer service tokens.

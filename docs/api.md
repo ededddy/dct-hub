@@ -52,6 +52,37 @@ unknown board, `422` unknown format, `429` per-identity render rate limit
 (`policy.max_renders_per_minute`), `502` render failed (detail carries the
 dct stderr tail), `504` render timeout.
 
+### `POST /api/warm`
+
+Deploy-pipeline warm step: renders every board+variable combo declared in
+`warm.boards` (config) so no viewer pays a cold cache miss after a deploy or
+dct upgrade. Auto (non-force) semantics — unchanged boards come back `cached`
+without querying the warehouse.
+
+```json
+{"wait": true}                         // optional body; false submits and returns 202
+```
+
+Requires `refresh`, checked per board — a denied board fails its own entry,
+not the batch. Returns `200` with per-entry outcomes; any failed entry
+(unknown board, missing grant, invalid vars, render error, rate limit) flips
+the response to `502` so `curl -f` fails the pipeline — all entries are still
+reported. Entries still queued or rendering when the wait window closes report
+`running` with their job id and do not fail the batch; the artifact lands on
+its own.
+
+```json
+{
+  "ok": true,
+  "results": [
+    {"board": "sales_daily", "vars": {}, "key": "ae96250e0926fa7d",
+     "outcome": "done", "job_id": "9c1e7a2b4f0d4e8a", "duration_ms": 2177, "error": null}
+  ]
+}
+```
+
+CI usage: `curl -fsSL -X POST $HUB/api/warm -H "Authorization: Bearer $TOKEN"`.
+
 ## Render metadata & artifacts
 
 ### `GET /api/renders/{key}`

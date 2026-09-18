@@ -1,9 +1,10 @@
 """Loads charts-tool.yml. Relative paths resolve against the config file's directory."""
 
 from pathlib import Path
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth.config import AccessConfig, AuthConfig
 
@@ -54,6 +55,28 @@ class RetentionConfig(BaseModel):
     sweep_interval_s: int = 3600
 
 
+class WarmBoard(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    board: str
+    # Variable combos to warm; [{}] warms the board's declared defaults.
+    vars: list[dict[str, Any]] = Field(default_factory=lambda: [{}])
+
+
+class WarmConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Boards rendered by `POST /api/warm` (the deploy-pipeline warm step).
+    boards: list[WarmBoard] = Field(default_factory=list)
+
+    @field_validator("boards", mode="before")
+    @classmethod
+    def _normalize(cls, value: object) -> object:
+        if isinstance(value, list):
+            return [{"board": entry} if isinstance(entry, str) else entry for entry in value]
+        return value
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -65,6 +88,7 @@ class Config(BaseModel):
     render: RenderConfig = Field(default_factory=RenderConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    warm: WarmConfig = Field(default_factory=WarmConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     access: AccessConfig = Field(default_factory=AccessConfig)
 
