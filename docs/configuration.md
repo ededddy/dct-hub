@@ -18,7 +18,14 @@ at startup, not silently at runtime. Secret-looking fields accept
 
 | Key | Default | Purpose |
 |---|---|---|
-| `dir` | `.hub` | Artifacts (`artifacts/`) + metadata DB (`meta.db`) |
+| `dir` | `.hub` | Local state: artifacts (`artifacts/`) + metadata DB (`meta.db`). In HA mode: staging scratch only |
+| `postgres` | unset | Postgres DSN, `${ENV_VAR}` expanded. **Set = HA mode**: metadata, queue, rate limit, leadership in Postgres; artifacts in S3; N replicas share them |
+| `s3` | unset | **Required when `postgres` is set.** `bucket`; `endpoint_url` (MinIO/on-prem — omit for AWS); `prefix` (default `artifacts/`); `region`. Credentials via the standard env chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), never this file |
+
+Rules: `postgres` without `s3.bucket` is rejected, as is `s3` without
+`postgres` (shared blobs need shared metadata). HA mode requires the `ha`
+extra (`asyncpg`, `aiobotocore` — included in the Docker image). Switching
+modes starts a fresh store: no migration — re-warm after switching.
 
 ## `render:`
 

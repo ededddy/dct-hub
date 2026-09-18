@@ -57,3 +57,35 @@ def test_warm_board_rejects_unknown_keys(tmp_path):
     config_file.write_text("project_dir: .\nwarm:\n  boards:\n    - {board: x, bogus: 1}\n")
     with pytest.raises(ValidationError):
         load_config(config_file)
+
+
+def test_ha_requires_s3_bucket_with_postgres(tmp_path):
+    config_file = tmp_path / "charts-tool.yml"
+    config_file.write_text("project_dir: .\nstorage:\n  postgres: postgresql://hub/db\n")
+    with pytest.raises(ValidationError, match="s3.bucket"):
+        load_config(config_file)
+
+
+def test_ha_rejects_s3_without_postgres(tmp_path):
+    config_file = tmp_path / "charts-tool.yml"
+    config_file.write_text("project_dir: .\nstorage:\n  s3:\n    bucket: artifacts\n")
+    with pytest.raises(ValidationError, match="postgres"):
+        load_config(config_file)
+
+
+def test_ha_valid_config_and_env_dsn(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_PG_DSN", "postgresql://hub:secret@pg/db")
+    config_file = tmp_path / "charts-tool.yml"
+    config_file.write_text(
+        "project_dir: .\n"
+        "storage:\n"
+        "  postgres: ${TEST_PG_DSN}\n"
+        "  s3:\n"
+        "    bucket: artifacts\n"
+        "    endpoint_url: http://minio:9000\n"
+    )
+    config = load_config(config_file)
+    assert config.storage.postgres == "postgresql://hub:secret@pg/db"
+    assert config.storage.s3.bucket == "artifacts"
+    assert config.storage.s3.endpoint_url == "http://minio:9000"
+    assert config.storage.s3.prefix == "artifacts/"

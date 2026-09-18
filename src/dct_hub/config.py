@@ -4,15 +4,41 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .auth.config import AccessConfig, AuthConfig
+from .auth.config import AccessConfig, AuthConfig, expand_env
+
+
+class S3Config(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: str = ""
+    # MinIO / on-prem object storage; omit for AWS.
+    endpoint_url: str | None = None
+    prefix: str = "artifacts/"
+    region: str | None = None
+    # Credentials come from the standard env chain (AWS_ACCESS_KEY_ID /
+    # AWS_SECRET_ACCESS_KEY), never from this file.
 
 
 class StorageConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dir: Path = Path(".hub")
+    # Postgres DSN. Set => HA mode: metadata, queue, rate limit and
+    # leadership live in Postgres, artifacts in S3, and many replicas share
+    # them. Unset => single-node: SQLite + local filesystem under dir.
+    postgres: str = ""
+    s3: S3Config = Field(default_factory=S3Config)
+
+    @model_validator(mode="after")
+    def _check(self) -> "StorageConfig":
+        self.postgres = expand_env(self.postgres)
+        if self.postgres and not self.s3.bucket:
+            raise ValueError("storage.postgres requires storage.s3.bucket (HA artifacts live in S3)")
+        if self.s3.bucket and not self.postgres:
+            raise ValueError("storage.s3 without storage.postgres is invalid (shared blobs need shared metadata)")
+        return self
 
 
 class RenderConfig(BaseModel):

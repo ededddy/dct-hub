@@ -5,9 +5,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dct_hub.api import create_app
+from dct_hub.blobs import artifact_locator
 from dct_hub.config import Config
 from dct_hub.dct import DctError, RenderResult
-from dct_hub.store import ArtifactStore
 
 
 class FakeDct:
@@ -104,11 +104,10 @@ def test_unknown_format_rejected(client):
     assert client.post("/api/renders", json={"board": "sales_daily", "format": "../evil"}).status_code == 422
 
 
-def test_artifact_path_rejects_unsafe_format(tmp_path):
-    store = ArtifactStore(tmp_path)
+def test_artifact_locator_rejects_unsafe_format():
     with pytest.raises(ValueError):
-        store.new_artifact_path("b", "k", "../x")
-    assert store.new_artifact_path("b", "k", "html").name == "k.html"
+        artifact_locator("b", "k", "../x")
+    assert artifact_locator("b", "k", "html") == "b/k.html"
 
 
 def test_var_validation(client):

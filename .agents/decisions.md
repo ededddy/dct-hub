@@ -82,6 +82,36 @@ next start. Concurrency forced to 1 when `render.query_cache` is set (DuckDB
 single-writer).
 **Rejected:** external queue (Redis/RQ) — operational overkill for one
 container; multi-process single-flight — would need an external lock.
+**Superseded for HA mode by D18:** with `storage.postgres` set, the queue is
+cluster-wide (single-flight by unique index, SKIP LOCKED claims). This entry
+still describes the default single-node mode.
+
+### D18. HA mode: externalized state in Postgres + S3, replicas stateless
+With `storage.postgres` set, every replica is stateless: metadata, job queue,
+rate limit and leadership live in Postgres; artifact blobs live in S3-compatible
+storage (MinIO for air-gapped). No Redis — queue/lock/limit QPS is low, and the
+jobs table, advisory locks, and a hits table cover all three.
+Load-bearing semantics:
+- **Single-flight by schema**: a partial unique index on
+  `jobs(key) WHERE status IN ('queued','running')`; insert conflict = coalesce.
+  No cross-node check-then-insert race.
+- **Claims**: `FOR UPDATE SKIP LOCKED`, stamped `claimed_by = hostname:pid`. A
+  booting replica interrupts only its own node id; a janitor (advisory-lock
+  leader) reaps running jobs older than `render.timeout_s + 120s` — orphans
+  from dead replicas.
+- **Blob/row invariant**: publish blob before its renders row; delete row
+  before blob. A row always implies the blob exists, so serving trusts
+  metadata (no per-request HEAD on the hot path beyond the exists preflight).
+- **Serving streams through the hub** from S3 — per-request grants and the
+  sandbox CSP still apply to every byte (D1). Presigned URLs rejected: they
+  bypass authorization.
+- **`wait` is event + poll**: instant for locally-executed jobs, 0.5s poll
+  discovers jobs finished by other replicas.
+- Local mode is untouched: SQLite + filesystem remains the default and the
+  dev loop; switching modes starts a fresh store (re-warm after switching).
+**Rejected:** Redis for queue/limiter (third infra system, no capability we
+lack); presigned S3 URLs (authz bypass); shared-NFS artifacts (SQLite-over-NFS
+locking, torn reads); per-replica rate limiting (N × configured cap).
 
 ### D11. Scalar variables only over the API
 Vars are stringified scalars (`--var k=v`); `""` means unset. Multiselect/
@@ -118,6 +148,9 @@ documented `min_interval_s` bypass. In-memory sliding window (single process,
 D10); resets on restart, acceptable for an abuse cap. Stale-while-revalidate
 over the limit skips the refresh and serves stale rather than failing the
 page. Default-off so existing cron/Airflow automation is unaffected.
+In HA mode (D18) the limiter runs on a shared `rate_hits` table, so the cap is
+cluster-wide; count-then-insert across nodes can overshoot slightly — still an
+abuse cap, not a quota.
 
 ### D17. Deploy-time warming via config + `POST /api/warm`, auto semantics
 The warm list is declared in `charts-tool.yml` (`warm.boards`) and executed by

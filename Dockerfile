@@ -16,7 +16,7 @@ COPY dist/dct_hub-*.whl /tmp/
 # requirements.lock); the image install resolves the same pinned versions
 # from the vendored set with no index access.
 RUN pip install --no-cache-dir --no-index --find-links /tmp/wheels \
-      /tmp/dct_hub-*.whl -r /tmp/image-requirements.txt \
+      '/tmp/dct_hub-*.whl[ha]' -r /tmp/image-requirements.txt \
     && rm -rf /tmp/wheels /tmp/requirements.lock /tmp/image-requirements.txt /tmp/dct_hub-*.whl
 
 RUN useradd --create-home --uid 10001 dcthub \

@@ -15,7 +15,7 @@ class RateLimiter:
         self.limit = limit_per_minute
         self._hits: dict[str, deque[float]] = {}
 
-    def allow(self, key: str) -> bool:
+    async def allow(self, key: str) -> bool:
         """Record one hit for `key`; False when the window is already full."""
         if self.limit <= 0:
             return True

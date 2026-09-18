@@ -103,7 +103,7 @@ def register_ui(app: FastAPI, service: "RenderService", config, identity_of, aut
         if q.strip():
             boards = await _search(service, q.strip(), boards)
 
-        latest = service.store.latest_renders()
+        latest = await service.store.latest_renders()
         cards = [
             {
                 "board": b.board,
@@ -156,7 +156,7 @@ def register_ui(app: FastAPI, service: "RenderService", config, identity_of, aut
                 "duration_ms": r.duration_ms,
                 "url": f"/b/{board}" + ("?" + urlencode(r.variables) if r.variables else ""),
             }
-            for r in service.store.list_renders(board, limit=10)
+            for r in await service.store.list_renders(board, limit=10)
         ]
 
         return templates.TemplateResponse(

@@ -37,6 +37,13 @@ In `charts-tool.yml`, point `project_dir` at `/project` and `storage.dir` at
 secrets), never in the config. ARM builds: `PLATFORM=aarch64-unknown-linux-gnu
 PLATFORM_ARCH=aarch64 scripts/vendor_wheels.sh`.
 
+**HA (active-active):** set `storage.postgres` + `storage.s3` and run ≥2
+replicas behind a load balancer — they are stateless. Single-flight, the
+render queue, and the rate limit become cluster-wide, artifacts stream from
+S3, and housekeeping is leader-elected via advisory lock. The image bakes in
+the `ha` extra (`asyncpg`, `aiobotocore`). See `docs/deployment.md` § HA
+topology.
+
 Retention is off by default; enable the sweeper in config to prune non-frozen
 artifacts by age (`max_age_days`) and count (`max_per_board`). Frozen
 snapshots are never pruned, and an unclassifiable artifact (e.g. `dct

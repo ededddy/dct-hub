@@ -75,7 +75,8 @@ dct render <changed boards>   # optional smoke: catches what dry-run can't
 git -C /project pull            # or rsync, artifact unpack, image bake
 #    Board discovery is a per-request filesystem scan — no hub restart.
 
-# 2. Warm the declared boards:
+# 2. Warm the declared boards (one call — in HA this warms every replica,
+#    since metadata and artifacts are shared):
 curl -fsSL -X POST "$HUB/api/warm" -H "Authorization: Bearer $DCT_HUB_CI_TOKEN"
 ```
 
@@ -113,15 +114,17 @@ keeps viewers off the render path.
 ## Day-2 operations
 
 **Monitor.** `GET /api/jobs` is the render audit trail (status, mode,
-`requested_by`, error tail, timings) — alert on `error` rate. Auth events log
-to stderr under `dct_hub.auth` / `dct_hub.access`; ship them. `/healthz` for
-liveness (the Docker healthcheck uses it).
+`requested_by`, error tail, timings — and `claimed_by` in HA, so you can see
+which replica ran a job) — alert on `error` rate. Auth events log to stderr
+under `dct_hub.auth` / `dct_hub.access`; ship them. `/healthz` for liveness
+(the Docker healthcheck uses it); in HA, alert on 5xx rates too — `/healthz`
+does not probe Postgres.
 
 **Upgrade dct.** Bump `requirements-dbt.txt` → `scripts/vendor_wheels.sh` →
-rebuild → redeploy → `POST /api/warm`. The dct version is in the cache key,
-so every board re-renders on demand after an upgrade; warming absorbs that
-for the listed boards. Upgrade the hub image and dct together — the lock
-covers both.
+rebuild → redeploy (rolling, in HA) → `POST /api/warm`. The dct version is in
+the cache key, so every board re-renders on demand after an upgrade; warming
+absorbs that for the listed boards. Upgrade the hub image and dct together —
+the lock covers both.
 
 **Rollback a board.** `git revert` the YAML, re-sync, re-warm. The cache key
 returns to a value that likely still has an artifact on disk (retention
@@ -138,7 +141,9 @@ are always kept (`configuration.md` § retention).
 | Render fails (bad SQL, warehouse down) | Cached artifacts keep serving; a board with no artifact gets 502 in the iframe | `GET /api/jobs` error tail; fix board/warehouse; re-warm |
 | Warm call fails | Pipeline red; deploy still live | Read per-board errors in the response body; usually a board/warehouse/grant issue, not a rollback trigger |
 | `dct` binary broken/missing | Serving of existing artifacts continues; new renders 502 | Restore the binary in the image; no data lost |
-| Hub restarts | Brief outage; artifacts + `meta.db` persist in the state volume; in-flight jobs marked `interrupted` | Nothing — re-warm if the restart followed a deploy |
+| Hub restarts (single-node) | Brief outage; state persists in the volume; in-flight jobs marked `interrupted` | Nothing — re-warm if the restart followed a deploy |
+| A replica dies (HA) | LB routes to survivors; jobs it claimed are reaped to `interrupted` within a minute; viewers retry on another replica | Nothing automatic — check the dead node's logs |
+| Postgres unreachable (HA) | Store-backed pages and renders 502 cluster-wide; `/healthz` stays green (process liveness, not readiness) | Restore PG — pools reconnect on their own; alert on 5xx rate, don't rely on the LB check alone |
 | Bad board deployed | That board errors; every other board unaffected | Revert + re-sync + re-warm (see Rollback) |
 | Warm lists a deleted board | 502 with per-board `board not found` | Remove it from `warm.boards` |
 

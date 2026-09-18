@@ -19,13 +19,14 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth.access import AccessPolicy, Forbidden, Unauthenticated, require
 from .auth.identity import Identity, resolve_identity
 from .auth.oidc import OidcClient, register_auth_routes
+from .blobs import LocalBlobs, S3Blobs, artifact_locator
 from .boards import (
     BoardNotFoundError,
     InvalidBoardRef,
@@ -36,11 +37,11 @@ from .boards import (
 from .cachekey import artifact_key, board_fingerprint
 from .config import Config
 from .dct import Dct, DctError
-from .gc import RetentionSweeper
+from .gc import RetentionSweeper, janitor_loop
 from .policy import DATE_INPUT_TYPES, CachePolicy, Freshness
 from .queue import RenderQueue
 from .ratelimit import RateLimiter
-from .store import ArtifactStore, JobRecord, RenderRecord, utcnow_iso
+from .store import JobRecord, LocalStore, RenderRecord, utcnow_iso
 from .ui import register_ui
 
 MEDIA_TYPES = {
@@ -110,7 +111,23 @@ class WarmResponse(BaseModel):
 class RenderService:
     def __init__(self, config: Config):
         self.config = config
-        self.store = ArtifactStore(config.storage.dir)
+        self.ha_mode = bool(config.storage.postgres)
+        if self.ha_mode:
+            from .store_pg import PgRateLimiter, PgStore
+
+            self.store = PgStore(config.storage.postgres)
+            self.blobs = S3Blobs(
+                bucket=config.storage.s3.bucket,
+                prefix=config.storage.s3.prefix,
+                staging_dir=config.storage.dir / "staging",
+                endpoint_url=config.storage.s3.endpoint_url,
+                region=config.storage.s3.region,
+            )
+            self.rate_limiter = PgRateLimiter(self.store, config.policy.max_renders_per_minute)
+        else:
+            self.store = LocalStore(config.storage.dir)
+            self.blobs = LocalBlobs(config.storage.dir / "artifacts")
+            self.rate_limiter = RateLimiter(config.policy.max_renders_per_minute)
         self.dct = Dct(
             project_dir=config.project_dir,
             bin=config.dct_bin,
@@ -118,10 +135,22 @@ class RenderService:
             query_cache=config.render.query_cache,
         )
         self.policy = CachePolicy(config.policy, describe=self.describe_cached)
-        self.rate_limiter = RateLimiter(config.policy.max_renders_per_minute)
         concurrency = 1 if config.render.query_cache else config.policy.max_concurrent
-        self.queue = RenderQueue(self.store, concurrency, self.execute_render)
+        self.queue = RenderQueue(
+            self.store,
+            concurrency,
+            self.execute_render,
+            single_node=not self.ha_mode,
+            # HA: submissions land in Postgres from any replica, so the idle
+            # worker loop polls briskly instead of relying on the local wake.
+            idle_poll_s=1.0 if self.ha_mode else 5.0,
+        )
         self._describe_cache: dict[str, dict] = {}
+
+    async def start(self) -> None:
+        if hasattr(self.store, "connect"):
+            await self.store.connect()
+        await self.queue.start()
 
     async def describe_cached(self, board_file: Path) -> dict:
         fingerprint = board_fingerprint(self.config.charts_root, board_file, self.config.project_dir / "dbt_charts.yml")
@@ -190,7 +219,9 @@ class RenderService:
         return artifact_key(board, variables, fingerprint, fmt, dct_version), dct_version, fingerprint
 
     def _usable(self, record: RenderRecord | None) -> RenderRecord | None:
-        if record and record.status == "ok" and Path(record.artifact_path).exists():
+        # Metadata is the source of truth: blobs are published before their
+        # row and deleted after it, so an ok row implies the blob exists.
+        if record and record.status == "ok":
             return record
         return None
 
@@ -198,28 +229,36 @@ class RenderService:
         variables = {k: str(v) for k, v in variables.items() if str(v) != ""}
         _, board_file = self._resolve(board)
         key, _, fingerprint = await self._key(board, board_file, variables, fmt)
-        return self._usable(self.store.get(key)), key, board_file, fingerprint, variables
+        return self._usable(await self.store.get(key)), key, board_file, fingerprint, variables
 
     async def execute_render(self, job: JobRecord) -> RenderRecord:
         # Only successful renders enter the renders table: a failed refresh must
         # never displace the last good artifact. Failures are recorded on the job.
         _, board_file = self._resolve(job.board)
         dct_version = await self.dct.version()
-        output = self.store.new_artifact_path(job.board, job.key, job.format)
-        result = await self.dct.render(board_file, job.variables, output, job.format)
+        locator = artifact_locator(job.board, job.key, job.format)
+        staging = self.blobs.staging_path(locator)
+        try:
+            result = await self.dct.render(board_file, job.variables, staging, job.format)
+            # Publish blob before its metadata row; a renders row implies the blob.
+            await self.blobs.put_file(locator, staging)
+        finally:
+            # No-op after a successful publish (os.replace moved the file);
+            # removes the orphan when the render or the publish failed.
+            staging.unlink(missing_ok=True)
         record = RenderRecord(
             key=job.key,
             board=job.board,
             variables=job.variables,
             format=job.format,
-            artifact_path=str(output),
+            artifact_path=locator,
             status="ok",
             error=None,
             duration_ms=result.duration_ms,
             rendered_at=utcnow_iso(),
             dct_version=dct_version,
         )
-        self.store.put(record)
+        await self.store.put(record)
         return record
 
     async def warm_submit(self, board: str, variables: dict[str, Any], fmt: str, requested_by: str) -> WarmResult:
@@ -248,10 +287,10 @@ class RenderService:
             freshness = await self.policy.freshness(board_file, fingerprint, variables, record)
             if freshness in (Freshness.FROZEN, Freshness.FRESH):
                 return WarmResult(board=board, vars=variables, key=key, outcome="cached", duration_ms=record.duration_ms)
-            if self.policy.within_min_interval(self.store.last_activity(key)):
+            if self.policy.within_min_interval(await self.store.last_activity(key)):
                 return WarmResult(board=board, vars=variables, key=key, outcome="cached", duration_ms=record.duration_ms)
 
-        if not self.rate_limiter.allow(requested_by):
+        if not await self.rate_limiter.allow(requested_by):
             return WarmResult(board=board, vars=variables, key=key, outcome="error", error="render rate limit exceeded; retry shortly")
         job, _ = await self.queue.submit(
             key=key, board=board, variables=variables, fmt=fmt, mode="auto", requested_by=requested_by,
@@ -265,7 +304,7 @@ class RenderService:
             return result
         job = await self.queue.wait(result.job_id, timeout_s=self.config.render.timeout_s + 15)
         if job is not None and job.status == "done":
-            record = self.store.get(result.key) if result.key else None
+            record = await self.store.get(result.key) if result.key else None
             return result.model_copy(update={"outcome": "done", "duration_ms": record.duration_ms if record else None})
         if job is not None and job.status == "error":
             return result.model_copy(update={"outcome": "error", "error": (job.error or "")[-1000:]})
@@ -319,13 +358,17 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        service.queue.start()
-        sweeper = None
-        if config.retention.enabled:
-            sweeper = asyncio.create_task(RetentionSweeper(config, service.store, service.policy).run())
+        await service.start()
+        housekeeping = None
+        if service.ha_mode:
+            # Leader-elected via the metadata store: reaps orphaned jobs,
+            # prunes rate-limit hits, and runs retention when enabled.
+            housekeeping = asyncio.create_task(janitor_loop(service))
+        elif config.retention.enabled:
+            housekeeping = asyncio.create_task(RetentionSweeper(config, service.store, service.blobs, service.policy).run())
         yield
-        if sweeper is not None:
-            sweeper.cancel()
+        if housekeeping is not None:
+            housekeeping.cancel()
 
     app = FastAPI(
         title="dct-hub",
@@ -408,10 +451,10 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
             freshness = await service.policy.freshness(board_file, fingerprint, variables, record)
             if freshness in (Freshness.FROZEN, Freshness.FRESH):
                 return _render_response(record, key, board, variables, request.format, "cached")
-            if service.policy.within_min_interval(service.store.last_activity(key)):
+            if service.policy.within_min_interval(await service.store.last_activity(key)):
                 return _render_response(record, key, board, variables, request.format, "cached", stale=True)
 
-        if not service.rate_limiter.allow(identity.sub if identity else "anon"):
+        if not await service.rate_limiter.allow(identity.sub if identity else "anon"):
             raise HTTPException(status_code=429, detail="render rate limit exceeded; retry shortly")
         mode = "force" if request.force else "auto"
         job, _ = await service.queue.submit(
@@ -421,7 +464,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         if request.wait:
             job = await service.queue.wait(job.id, timeout_s=config.render.timeout_s + 15)
             if job and job.status == "done":
-                record = service.store.get(key)
+                record = await service.store.get(key)
                 return _render_response(record, key, board, variables, request.format, "done", job=job)
             if job and job.status == "error":
                 raise HTTPException(status_code=502, detail=f"dct render failed: {(job.error or '')[-1000:]}")
@@ -473,7 +516,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         identity = identity_of(request)
         if app.state.policy is not None and identity is None:
             raise Unauthenticated()
-        record = service.store.get(key)
+        record = await service.store.get(key)
         if record is None:
             raise HTTPException(status_code=404, detail=f"unknown render key: {key}")
         require(app.state.policy, identity, "view", record.board)
@@ -490,18 +533,18 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         }
 
     @app.get("/api/renders/{key}/artifact")
-    async def render_artifact(key: str, request: Request) -> FileResponse:
+    async def render_artifact(key: str, request: Request) -> StreamingResponse:
         identity = identity_of(request)
         if app.state.policy is not None and identity is None:
             raise Unauthenticated()
-        record = service.store.get(key)
-        if record is None or record.status != "ok" or not Path(record.artifact_path).exists():
+        record = await service.store.get(key)
+        if record is None or record.status != "ok" or not await service.blobs.exists(record.artifact_path):
             raise HTTPException(status_code=404, detail=f"no artifact for render key: {key}")
         require(app.state.policy, identity, "view", record.board)
         # html and svg are both script-capable when opened as a document
         headers = {"Content-Security-Policy": SANDBOX_CSP} if record.format in ("html", "svg") else None
-        return FileResponse(
-            record.artifact_path,
+        return StreamingResponse(
+            service.blobs.read(record.artifact_path),
             media_type=MEDIA_TYPES.get(record.format, "application/octet-stream"),
             headers=headers,
         )
@@ -511,7 +554,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         identity = identity_of(request)
         if app.state.policy is not None and identity is None:
             raise Unauthenticated()
-        all_jobs = service.store.list_jobs(limit)
+        all_jobs = await service.store.list_jobs(limit)
         if app.state.policy is not None:
             all_jobs = [j for j in all_jobs if app.state.policy.allows(identity, "view", j.board)]
         return [_job_json(j) for j in all_jobs]
@@ -521,7 +564,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         identity = identity_of(request)
         if app.state.policy is not None and identity is None:
             raise Unauthenticated()
-        job = service.store.get_job(job_id)
+        job = await service.store.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
         require(app.state.policy, identity, "view", job.board)
@@ -548,7 +591,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
             raise HTTPException(status_code=502, detail=exc.stderr[-1000:])
 
     @app.get("/raw/{board:path}")
-    async def raw_board(board: str, request: Request) -> FileResponse:
+    async def raw_board(board: str, request: Request) -> StreamingResponse:
         board = service._normalize(board)
         variables_qs = dict(request.query_params)
         identity = authorize(request, "view", board)
@@ -557,7 +600,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         if record is None:
             authorize(request, "refresh", board)
             await service.validate_vars(board_file, variables)
-            if not service.rate_limiter.allow(identity.sub if identity else "anon"):
+            if not await service.rate_limiter.allow(identity.sub if identity else "anon"):
                 raise HTTPException(status_code=429, detail="render rate limit exceeded; retry shortly")
             job, _ = await service.queue.submit(
                 key=key, board=board, variables=variables, fmt="html",
@@ -566,16 +609,16 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
             job = await service.queue.wait(job.id, timeout_s=config.render.timeout_s + 15)
             if job is not None and job.status == "error":
                 raise HTTPException(status_code=502, detail=f"dct render failed: {(job.error or '')[-1000:]}")
-            record = service._usable(service.store.get(key))
+            record = service._usable(await service.store.get(key))
             if record is None:
                 raise HTTPException(status_code=504, detail="render still in progress; retry shortly")
         else:
             freshness = await service.policy.freshness(board_file, fingerprint, variables, record)
             if (
                 freshness == Freshness.STALE
-                and not service.policy.within_min_interval(service.store.last_activity(key))
-                and service.store.active_job_for_key(key) is None
-                and service.rate_limiter.allow(identity.sub if identity else "anon")
+                and not service.policy.within_min_interval(await service.store.last_activity(key))
+                and await service.store.active_job_for_key(key) is None
+                and await service.rate_limiter.allow(identity.sub if identity else "anon")
             ):
                 try:
                     await service.validate_vars(board_file, variables)
@@ -587,8 +630,10 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
                         mode="auto", requested_by=identity.sub if identity else "anon",
                     )
 
-        return FileResponse(
-            record.artifact_path,
+        if not await service.blobs.exists(record.artifact_path):
+            raise HTTPException(status_code=404, detail="artifact missing; retry to re-render")
+        return StreamingResponse(
+            service.blobs.read(record.artifact_path),
             media_type="text/html",
             headers={
                 "X-Dct-Hub-Key": record.key,

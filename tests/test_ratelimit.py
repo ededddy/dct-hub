@@ -1,3 +1,4 @@
+import asyncio
 import time
 from pathlib import Path
 
@@ -38,14 +39,14 @@ def make_client(tmp_path, **policy):
 
 def test_limiter_sliding_window():
     limiter = RateLimiter(2)
-    assert limiter.allow("alice") is True
-    assert limiter.allow("alice") is True
-    assert limiter.allow("alice") is False
-    assert limiter.allow("bob") is True  # windows are per identity
+    assert asyncio.run(limiter.allow("alice")) is True
+    assert asyncio.run(limiter.allow("alice")) is True
+    assert asyncio.run(limiter.allow("alice")) is False
+    assert asyncio.run(limiter.allow("bob")) is True  # windows are per identity
 
     unlimited = RateLimiter(0)
     for _ in range(50):
-        assert unlimited.allow("alice") is True
+        assert asyncio.run(unlimited.allow("alice")) is True
 
 
 def test_render_rate_limit_429(tmp_path):

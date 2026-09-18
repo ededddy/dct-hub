@@ -66,11 +66,56 @@ and health-checks `GET /healthz` via stdlib urllib (no curl in slim).
    uses an internal CA (extend the Dockerfile or mount and set
    `SSL_CERT_FILE`).
 
-## 4. Production checklist
+## 4. HA topology (active-active)
+
+Replicas are stateless: run **two or more** behind a load balancer that
+health-checks `/healthz`. Shared state lives outside the containers:
+
+```
+LB ──► dct-hub replica A ─┐
+   ──► dct-hub replica B ─┼──► PostgreSQL   (metadata, job queue, rate limit,
+   ──► dct-hub replica C ─┘    advisory-lock leadership)
+                          └──► S3 / MinIO   (artifact blobs)
+```
+
+```yaml
+# charts-tool.yml (same file on every replica)
+storage:
+  dir: /state                       # staging scratch only, per replica
+  postgres: ${DCT_HUB_PG_DSN}       # postgresql://user:pass@pg-host/db
+  s3:
+    bucket: dct-hub-artifacts
+    endpoint_url: http://minio.internal:9000   # omit for AWS
+auth:
+  session_secret: ${DCT_HUB_SESSION_SECRET}    # MUST be identical on all
+                                               # replicas (signed cookies)
+```
+
+- Any supported PostgreSQL works (claims use `FOR UPDATE SKIP LOCKED`). One
+  small database is plenty — write volume is render-queue traffic.
+- S3-compatible object storage; MinIO for air-gapped. Credentials via the
+  standard env chain on each replica.
+- **Single-flight, the render queue, and the rate limit are cluster-wide** —
+  a board renders once no matter how many replicas are asked. `/api/warm`
+  needs no per-replica fan-out: one call warms the shared store.
+- Housekeeping (stale-job reaper, rate-hit pruning, retention sweep) runs on
+  a leader elected by advisory lock; if the leader dies, another replica
+  takes over within a minute.
+- The `ha` extra (`asyncpg`, `aiobotocore`) is baked into the image; for bare
+  installs use `pip install 'dct-hub[ha]'`.
+- PG-backed integration tests run in CI with a Postgres service by exporting
+  `DCT_HUB_TEST_PG_DSN` (locally they skip).
+- Switching modes starts a fresh store — re-warm (`POST /api/warm`) after
+  cutover.
+
+## 5. Production checklist
 
 - [ ] `auth.enabled: true` with a real `session_secret` from a secret manager
+      (identical on every replica when running HA — sessions are signed cookies)
 - [ ] `session_https_only: true` behind TLS
 - [ ] Service tokens via `${ENV_VAR}` (CI/cron), groups mapped to an operator role
+- [ ] HA: `storage.postgres` + `storage.s3` set; ≥2 replicas behind an LB that
+      health-checks `/healthz`; warehouse sized for `max_concurrent` × replicas
 - [ ] Grants reviewed: `*` viewer is convenient but shadow carve-outs
       (`restricted/*`) for sensitive folders
 - [ ] `render.query_cache` set for warm re-renders (forces render concurrency to 1 — expected)

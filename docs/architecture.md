@@ -19,8 +19,10 @@ browser / CI ──► FastAPI app (api.py)
                    ├─ ui.py        Jinja catalog + board shell (templates/)
                    ├─ policy.py    freshness: FROZEN / FRESH / STALE
                    ├─ queue.py     async render queue, single-flight, worker pool
-                   ├─ store.py     artifacts on disk + SQLite metadata (renders, jobs)
-                   ├─ gc.py        retention sweeper (opt-in)
+                   ├─ store.py     metadata interface + LocalStore (SQLite, single-node)
+                   ├─ store_pg.py  PgStore (Postgres, HA) + cluster rate limiter
+                   ├─ blobs.py     artifact blobs: local FS (atomic) or S3 (HA)
+                   ├─ gc.py        retention sweeper; HA janitor (leader-elected)
                    └─ dct.py       async wrapper over the dct CLI (subprocess)
 ```
 
@@ -55,11 +57,13 @@ Two layers:
 - **L1 — dct query-result cache** (DuckDB file, `render.query_cache`): makes
   re-renders cheap when queries haven't changed. Single-writer → when enabled,
   the render worker pool is forced to 1.
-- **L2 — artifact store** (`.hub/artifacts/<board>/<key>.<fmt>`): the hub's
-  content-addressed cache. The key hashes: board path, sorted variables, board
-  source fingerprint (board file + `meta.yml` chain + `dbt_charts.yml`), output
+- **L2 — artifact store** (blob + metadata): the hub's content-addressed
+  cache. The key hashes: board path, sorted variables, board source
+  fingerprint (board file + `meta.yml` chain + `dbt_charts.yml`), output
   format, and dct version. Editing a board or upgrading dct invalidates
-  automatically.
+  automatically. Blobs live on local disk (`artifacts/<board>/<key>.<fmt>`)
+  or in S3 in HA mode; the renders row stores the blob locator. Publishing is
+  blob-then-row, deleting row-then-blob — a row always implies its blob.
 
 Freshness state machine per artifact (policy.py):
 
@@ -73,22 +77,35 @@ Freshness state machine per artifact (policy.py):
   metadata); the retention sweeper uses a stricter tri-state (`policy.frozen()`)
   so it never prunes what it can't classify.
 
-## Data model (`.hub/meta.db`)
+## Data model
 
-- `renders` — one row per artifact key: board, vars, format, artifact path,
+Single-node: `.hub/meta.db` (SQLite). HA mode: the same two tables in
+Postgres, plus `rate_hits` (D18).
+
+- `renders` — one row per artifact key: board, vars, format, blob locator,
   status, duration, rendered_at, dct_version. **Only successful renders**:
   a failed refresh must never displace the last good artifact.
 - `jobs` — execution audit: id, key, board, vars, mode (auto/force), status
-  (queued/running/done/error/interrupted), error tail, requested_by, timings.
-  Errors live here, not in `renders`.
+  (queued/running/done/error/interrupted), error tail, requested_by, timings,
+  claimed_by (which replica ran it). Errors live here, not in `renders`.
 
 ## Concurrency model
 
-Single process, asyncio throughout. Worker pool size `policy.max_concurrent`
-(forced to 1 when the DuckDB query cache is set). Submit/claim do their
-check-then-insert without awaits in between, so single-flight is race-free on
-one loop. Multi-process deployments would need an external lock — not
-supported today (single container by design).
+**Single-node (default):** one process, asyncio throughout. Worker pool size
+`policy.max_concurrent` (forced to 1 when the DuckDB query cache is set).
+Submit/claim do their check-then-insert without awaits in between, so
+single-flight is race-free on one loop.
+
+**HA mode (`storage.postgres` set):** N stateless replicas behind a load
+balancer. Single-flight is enforced by a partial unique index on active jobs
+per key; workers claim with `FOR UPDATE SKIP LOCKED` and stamp `claimed_by`;
+`wait` combines a local event with a 0.5s poll so callers observe jobs
+finished by other replicas; the rate limiter is a shared hits table; a
+janitor (advisory-lock leader, any one replica) reaps jobs orphaned by dead
+replicas, prunes rate hits, and runs the retention sweep. OIDC sessions are
+signed cookies, so login flows cross replicas freely as long as every
+replica shares `session_secret`. The L1 query cache and the describe cache
+stay per-replica (self-healing). See D18 for the invariants.
 
 ## UI architecture
 

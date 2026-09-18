@@ -148,10 +148,10 @@ def test_failed_refresh_preserves_last_good_artifact(tmp_path):
 
 def test_wait_returns_immediately_for_terminal_job(tmp_path):
     from dct_hub.queue import RenderQueue
-    from dct_hub.store import ArtifactStore
+    from dct_hub.store import LocalStore
 
     async def main():
-        store = ArtifactStore(tmp_path / ".hub")
+        store = LocalStore(tmp_path / ".hub")
 
         async def instant(job):
             return None
@@ -174,21 +174,23 @@ def test_interrupted_jobs_recovered_on_start(tmp_path):
     fake = FakeDct()
     app = make_app(tmp_path, fake)
     store = app.state.service.store
-    store.create_job(
-        __import__("dct_hub.store", fromlist=["JobRecord"]).JobRecord(
-            id="stale1",
-            key="somekey",
-            board="sales_daily",
-            variables={},
-            format="html",
-            status="running",
-            mode="auto",
-            error=None,
-            requested_by="ghost",
-            created_at="2026-09-17T00:00:00+00:00",
-            started_at="2026-09-17T00:00:00+00:00",
-            finished_at=None,
-            duration_ms=None,
+    asyncio.run(
+        store.submit_job(
+            __import__("dct_hub.store", fromlist=["JobRecord"]).JobRecord(
+                id="stale1",
+                key="somekey",
+                board="sales_daily",
+                variables={},
+                format="html",
+                status="running",
+                mode="auto",
+                error=None,
+                requested_by="ghost",
+                created_at="2026-09-17T00:00:00+00:00",
+                started_at="2026-09-17T00:00:00+00:00",
+                finished_at=None,
+                duration_ms=None,
+            )
         )
     )
     with TestClient(app) as client:

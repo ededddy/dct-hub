@@ -15,6 +15,7 @@ ARCH="${PLATFORM_ARCH:-x86_64}"                    # aarch64 for ARM
 
 uv pip compile pyproject.toml requirements-dbt.txt \
   --generate-hashes \
+  --extra ha \
   --python-version "$PYTHON_VERSION" \
   --python-platform "$PLATFORM" \
   -o requirements.lock
