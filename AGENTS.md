@@ -25,3 +25,21 @@ tokens; behavior and exit code are unchanged.
 - `RTK_DISABLED=1 <cmd>` — skip RTK for one command.
 - `rtk discover` — find past commands RTK could have condensed.
 <!-- /rtk-instructions -->
+
+# Versioning and commits
+
+This project uses **Semantic Versioning** (SemVer): versions follow
+`MAJOR.MINOR.PATCH` (e.g. `0.5.0`).
+
+- **MAJOR** — incompatible/breaking changes.
+- **MINOR** — new functionality, backwards compatible.
+- **PATCH** — backwards-compatible bug fixes.
+
+Commits follow **Conventional Commits** so version bumps can be derived from
+history: `<type>(<optional scope>): <description>`
+
+- `feat:` — new feature (bumps MINOR)
+- `fix:` — bug fix (bumps PATCH)
+- `feat!:` / `fix!:` or a `BREAKING CHANGE:` footer — breaking change (bumps MAJOR)
+- Other types: `chore:`, `docs:`, `refactor:`, `test:`, `build:`, `ci:`, `perf:`
+
