@@ -13,13 +13,14 @@ fresh (within TTL), stale (served while a background refresh is enqueued).
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth.access import AccessPolicy, Forbidden, Unauthenticated, require
@@ -36,8 +37,9 @@ from .cachekey import artifact_key, board_fingerprint
 from .config import Config
 from .dct import Dct, DctError
 from .gc import RetentionSweeper
-from .policy import CachePolicy, Freshness
+from .policy import DATE_INPUT_TYPES, CachePolicy, Freshness
 from .queue import RenderQueue
+from .ratelimit import RateLimiter
 from .store import ArtifactStore, JobRecord, RenderRecord, utcnow_iso
 from .ui import register_ui
 
@@ -50,6 +52,11 @@ MEDIA_TYPES = {
     "yaml": "application/yaml",
 }
 
+# Rendered HTML is served into an opaque origin: inline chart JS still runs,
+# but the artifact gets no cookies, no storage, and no API access as the
+# viewing user — a malicious or compromised board can't act for them.
+SANDBOX_CSP = "sandbox allow-scripts"
+
 
 class RenderRequest(BaseModel):
     board: str
@@ -57,6 +64,13 @@ class RenderRequest(BaseModel):
     format: str = "html"
     force: bool = False
     wait: bool = False
+
+    @field_validator("format")
+    @classmethod
+    def _known_format(cls, value: str) -> str:
+        if value not in MEDIA_TYPES:
+            raise ValueError(f"unknown format {value!r}; expected one of {sorted(MEDIA_TYPES)}")
+        return value
 
 
 class RenderResponse(BaseModel):
@@ -85,6 +99,7 @@ class RenderService:
             query_cache=config.render.query_cache,
         )
         self.policy = CachePolicy(config.policy, describe=self.describe_cached)
+        self.rate_limiter = RateLimiter(config.policy.max_renders_per_minute)
         concurrency = 1 if config.render.query_cache else config.policy.max_concurrent
         self.queue = RenderQueue(self.store, concurrency, self.execute_render)
         self._describe_cache: dict[str, dict] = {}
@@ -94,6 +109,46 @@ class RenderService:
         if fingerprint not in self._describe_cache:
             self._describe_cache[fingerprint] = await self.dct.describe(board_file)
         return self._describe_cache[fingerprint]
+
+    async def validate_vars(self, board_file: Path, variables: dict[str, str]) -> None:
+        """Reject undeclared or ill-typed variables before they reach a render.
+
+        Vars become `--var k=v` on the dct command line and boards may
+        interpolate them raw into SQL, so anything that can trigger warehouse
+        queries is checked against the board's declared variables first.
+        Free-text inputs can't be made safe here — quoting them is the board
+        author's duty. Serving a cached artifact never validates: it runs no
+        queries, so it must not break (D5).
+        """
+        try:
+            info = await self.describe_cached(board_file)
+        except DctError as exc:
+            raise HTTPException(status_code=502, detail=f"cannot validate variables: {exc.stderr[-500:]}")
+        declared = {v["name"]: v for v in info.get("variables", [])}
+        unknown = sorted(set(variables) - set(declared))
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown variable(s) {unknown}; declared: {sorted(declared)}",
+            )
+        for name, value in variables.items():
+            spec = declared[name]
+            options = [str(o) for o in (spec.get("options") or [])]
+            kind = spec.get("type") or ""
+            if options and value not in options:
+                raise HTTPException(status_code=400, detail=f"{name}: must be one of {options}")
+            if kind in DATE_INPUT_TYPES:
+                try:
+                    date.fromisoformat(value)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"{name}: expected an ISO date (YYYY-MM-DD)")
+            elif kind == "checkbox" and value not in {"true", "false"}:
+                raise HTTPException(status_code=400, detail=f"{name}: expected true or false")
+            elif kind == "number":
+                try:
+                    float(value)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"{name}: expected a number")
 
     def _resolve(self, board_ref: str) -> tuple[str, Path]:
         try:
@@ -232,6 +287,21 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
             async def login_unavailable() -> None:
                 raise HTTPException(status_code=400, detail="OIDC not configured; authenticate with a Bearer token")
 
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        # setdefault: artifact routes override CSP with a stricter sandbox one.
+        # unsafe-inline is unavoidable — all UI assets are inline by design (D13).
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "img-src 'self' data:; frame-ancestors 'self'",
+        )
+        return response
+
     def identity_of(request: Request) -> Identity | None:
         return resolve_identity(request, config.auth)
 
@@ -262,6 +332,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         board = service._normalize(request.board)
         identity = authorize(raw, "refresh", board)
         record, key, board_file, fingerprint, variables = await service.lookup(board, request.vars, request.format)
+        await service.validate_vars(board_file, variables)
 
         if record is not None and not request.force:
             freshness = await service.policy.freshness(board_file, fingerprint, variables, record)
@@ -270,6 +341,8 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
             if service.policy.within_min_interval(service.store.last_activity(key)):
                 return _render_response(record, key, board, variables, request.format, "cached", stale=True)
 
+        if not service.rate_limiter.allow(identity.sub if identity else "anon"):
+            raise HTTPException(status_code=429, detail="render rate limit exceeded; retry shortly")
         mode = "force" if request.force else "auto"
         job, _ = await service.queue.submit(
             key=key, board=board, variables=variables, fmt=request.format,
@@ -315,7 +388,13 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         if record is None or record.status != "ok" or not Path(record.artifact_path).exists():
             raise HTTPException(status_code=404, detail=f"no artifact for render key: {key}")
         require(app.state.policy, identity, "view", record.board)
-        return FileResponse(record.artifact_path, media_type=MEDIA_TYPES.get(record.format, "application/octet-stream"))
+        # html and svg are both script-capable when opened as a document
+        headers = {"Content-Security-Policy": SANDBOX_CSP} if record.format in ("html", "svg") else None
+        return FileResponse(
+            record.artifact_path,
+            media_type=MEDIA_TYPES.get(record.format, "application/octet-stream"),
+            headers=headers,
+        )
 
     @app.get("/api/jobs")
     async def jobs(request: Request, limit: int = 50) -> list[dict]:
@@ -367,6 +446,9 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
 
         if record is None:
             authorize(request, "refresh", board)
+            await service.validate_vars(board_file, variables)
+            if not service.rate_limiter.allow(identity.sub if identity else "anon"):
+                raise HTTPException(status_code=429, detail="render rate limit exceeded; retry shortly")
             job, _ = await service.queue.submit(
                 key=key, board=board, variables=variables, fmt="html",
                 mode="auto", requested_by=identity.sub if identity else "anon",
@@ -383,11 +465,17 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
                 freshness == Freshness.STALE
                 and not service.policy.within_min_interval(service.store.last_activity(key))
                 and service.store.active_job_for_key(key) is None
+                and service.rate_limiter.allow(identity.sub if identity else "anon")
             ):
-                await service.queue.submit(
-                    key=key, board=board, variables=variables, fmt="html",
-                    mode="auto", requested_by=identity.sub if identity else "anon",
-                )
+                try:
+                    await service.validate_vars(board_file, variables)
+                except HTTPException:
+                    pass  # unvalidated vars never reach the warehouse; the stale artifact is still served
+                else:
+                    await service.queue.submit(
+                        key=key, board=board, variables=variables, fmt="html",
+                        mode="auto", requested_by=identity.sub if identity else "anon",
+                    )
 
         return FileResponse(
             record.artifact_path,
@@ -398,6 +486,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
                 # artifacts are replaced in place after a refresh; never let
                 # the browser serve its own cached copy
                 "Cache-Control": "no-cache",
+                "Content-Security-Policy": SANDBOX_CSP,
             },
         )
 

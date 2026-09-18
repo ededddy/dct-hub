@@ -1,11 +1,14 @@
 """Who is calling: an Identity resolved from a Bearer token or the session cookie."""
 
 import hmac
+import logging
 from dataclasses import dataclass, field
 
 from starlette.requests import Request
 
 from .config import AuthConfig
+
+logger = logging.getLogger("dct_hub.auth")
 
 
 @dataclass
@@ -27,6 +30,7 @@ def resolve_identity(request: Request, auth: AuthConfig) -> Identity | None:
         for entry in auth.service_tokens:
             if entry.token and hmac.compare_digest(token, entry.token):
                 return Identity(sub=entry.name, name=entry.name, email="", groups=frozenset(entry.groups), via="token")
+        logger.warning("unrecognized bearer token presented")
         return None
 
     # Reached only when auth is enabled, which always installs SessionMiddleware.

@@ -73,6 +73,10 @@ and health-checks `GET /healthz` via stdlib urllib (no curl in slim).
       (`restricted/*`) for sensitive folders
 - [ ] `render.query_cache` set for warm re-renders (forces render concurrency to 1 — expected)
 - [ ] `policy.default_ttl_s` / `min_interval_s` tuned to warehouse cost tolerance
+- [ ] `policy.max_renders_per_minute` set as an abuse cap on renders (auto and
+      force) — leave headroom for the cron/service-token identity's bursts
+- [ ] Audit logging shipped: `dct_hub.auth` (logins, logouts, token rejections)
+      and `dct_hub.access` (grant denials) log to stderr alongside uvicorn
 - [ ] `retention.enabled: true` once comfortable — frozen snapshots are exempt,
       and unclassifiable artifacts are never pruned
 - [ ] Warehouse credentials via env/secrets, never in `charts-tool.yml`

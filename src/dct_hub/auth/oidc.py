@@ -8,6 +8,7 @@ The JWKS is refetched once on validation failure to survive key rotation.
 
 import base64
 import hashlib
+import logging
 import secrets
 import time
 from urllib.parse import urlencode
@@ -20,6 +21,8 @@ from joserfc import jwt as jose_jwt
 from joserfc.jwk import KeySet
 
 from .config import OidcConfig
+
+logger = logging.getLogger("dct_hub.auth")
 
 
 class OidcClient:
@@ -146,9 +149,14 @@ def register_auth_routes(app: FastAPI, oidc: OidcClient, groups_claim: str) -> N
     async def oidc_callback(request: Request, code: str = "", state: str = "") -> RedirectResponse:
         txn = request.session.pop("oidc_txn", None)
         if not txn or not state or state != txn["state"]:
+            logger.warning("OIDC callback with bad or missing state")
             raise HTTPException(status_code=400, detail="bad OAuth state")
-        tokens = await oidc.exchange(code, str(request.url_for("oidc_callback")), txn["verifier"])
-        claims = await oidc.validate_id_token(tokens["id_token"], txn["nonce"])
+        try:
+            tokens = await oidc.exchange(code, str(request.url_for("oidc_callback")), txn["verifier"])
+            claims = await oidc.validate_id_token(tokens["id_token"], txn["nonce"])
+        except HTTPException as exc:
+            logger.warning("OIDC callback failed: %s", exc.detail)
+            raise
         groups = claims.get(groups_claim) or []
         if isinstance(groups, str):
             groups = [groups]
@@ -158,10 +166,13 @@ def register_auth_routes(app: FastAPI, oidc: OidcClient, groups_claim: str) -> N
             "email": claims.get("email", ""),
             "groups": groups,
         }
+        logger.info("login: %s", claims.get("sub", ""))
         return RedirectResponse(txn["next"])
 
     @app.get("/auth/logout", include_in_schema=False)
     async def logout(request: Request) -> RedirectResponse:
+        user = request.session.get("user") or {}
+        logger.info("logout: %s", user.get("sub", ""))
         request.session.clear()
         return RedirectResponse("/")
 

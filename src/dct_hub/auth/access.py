@@ -9,10 +9,14 @@ the winning pattern are unioned, so one pattern can give different roles to
 different groups. No matching grant means deny.
 """
 
+import logging
+
 from fastapi import HTTPException, status
 
 from .config import AccessConfig
 from .identity import Identity
+
+logger = logging.getLogger("dct_hub.access")
 
 
 class Unauthenticated(HTTPException):
@@ -78,6 +82,8 @@ def require(policy: AccessPolicy | None, identity: Identity | None, capability: 
     if policy is None:
         return
     if identity is None:
+        logger.info("unauthenticated request needs %r on %r", capability, board)
         raise Unauthenticated()
     if not policy.allows(identity, capability, board):
+        logger.warning("denied: %s lacks %r on %r", identity.sub, capability, board)
         raise Forbidden(f"{identity.sub} lacks '{capability}' on {board!r}")

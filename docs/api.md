@@ -24,8 +24,9 @@ queries). Anonymous API callers get `401`; authenticated-but-unauthorized get
 }
 ```
 
-Requires `refresh` on the board. Returns `200` when the outcome is known
-(`cached`, or `done` with `wait: true`), `202` when work is queued/running.
+Requires `refresh` on the board. `vars` are validated against the board's
+declared variables before anything renders. Returns `200` when the outcome is
+known (`cached`, or `done` with `wait: true`), `202` when work is queued/running.
 
 Response:
 
@@ -46,8 +47,10 @@ Response:
 }
 ```
 
-Errors: `400` invalid board reference, `404` unknown board, `502` render failed
-(detail carries the dct stderr tail), `504` render timeout.
+Errors: `400` invalid board reference or unknown/invalid variable, `404`
+unknown board, `422` unknown format, `429` per-identity render rate limit
+(`policy.max_renders_per_minute`), `502` render failed (detail carries the
+dct stderr tail), `504` render timeout.
 
 ## Render metadata & artifacts
 
@@ -83,8 +86,16 @@ types, defaults, options), layout. Requires `view`.
 | `GET /raw/{board}?var=...` | The rendered artifact HTML (what the iframe loads) |
 
 `/raw/` is where render-on-miss (needs `refresh`) and stale-while-revalidate
-happen. Responses include `X-Dct-Hub-Key`, `X-Rendered-At`, and
-`Cache-Control: no-cache`.
+happen. Both validate variables against the board's declarations first (`400`),
+and render submissions are capped by `policy.max_renders_per_minute` (`429`;
+over the limit, a stale artifact is simply served without the background
+refresh). Responses include `X-Dct-Hub-Key`, `X-Rendered-At`, and
+`Cache-Control: no-cache`. HTML artifacts are served with
+`Content-Security-Policy: sandbox allow-scripts` — chart JS runs, but the
+artifact executes in an opaque origin with no cookies, storage, or API access
+as the viewer (same for `GET /api/renders/{key}/artifact` when the format is
+html or svg — both are script-capable when opened as a document). All responses carry `X-Content-Type-Options`, `Referrer-Policy`,
+`X-Frame-Options`, and a baseline CSP.
 
 ## Auth endpoints
 

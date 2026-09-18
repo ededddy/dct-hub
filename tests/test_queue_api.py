@@ -28,7 +28,7 @@ class FakeDct:
         return RenderResult(output_path=output, duration_ms=5)
 
     async def describe(self, board_file):
-        return {"variables": []}
+        return {"variables": [{"name": "region", "type": "input"}]}
 
 
 def make_app(tmp_path, fake: FakeDct, **policy_overrides):

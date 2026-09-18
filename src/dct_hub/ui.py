@@ -132,6 +132,7 @@ def register_ui(app: FastAPI, service: "RenderService", config, identity_of, aut
         identity = authorize(request, "view", board)
         query_vars = {k: v for k, v in request.query_params.items() if v != ""}
         record, key, board_file, fingerprint, variables = await service.lookup(board, query_vars, "html")
+        await service.validate_vars(board_file, variables)
         try:
             describe = await service.describe_cached(board_file)
         except DctError as exc:

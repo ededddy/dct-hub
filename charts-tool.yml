@@ -19,6 +19,7 @@ render:
 #   frozen_date_vars: true   # boards with all date vars < today never re-render
 #   min_interval_s: 300      # min seconds between renders of one artifact
 #   max_concurrent: 2        # render workers (forced to 1 with query_cache)
+#   max_renders_per_minute: 0  # per-identity render cap (auto + force); 0 = unlimited
 
 # retention:                 # artifact GC — opt-in (M5)
 #   enabled: true            # frozen snapshots are NEVER pruned

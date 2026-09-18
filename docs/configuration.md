@@ -36,6 +36,15 @@ at startup, not silently at runtime. Secret-looking fields accept
 | `frozen_date_vars` | `true` | All-past date variables → immutable artifact |
 | `min_interval_s` | `300` | Min seconds between renders of one artifact (`force` excepted) |
 | `max_concurrent` | `2` | Render workers (forced to 1 if `render.query_cache` set) |
+| `max_renders_per_minute` | `0` | Per-identity cap on render submissions per minute, across auto and force. `0` = unlimited |
+
+Variables reaching a render are validated against the board's `dct describe`
+declarations before any warehouse query runs: unknown names, out-of-list
+option values, and ill-typed date/number/checkbox values are rejected with
+`400`; if `describe` is unavailable the render is refused with `502` (fail
+closed). Serving an already-rendered artifact never validates. Free-text
+variables get no value check — board authors must quote them in SQL with
+dct's quoting helper, never interpolate them raw.
 
 ## `retention:` — artifact GC (opt-in)
 

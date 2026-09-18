@@ -88,6 +88,37 @@ Vars are stringified scalars (`--var k=v`); `""` means unset. Multiselect/
 daterange need typed handling and currently degrade to text inputs in the UI.
 **Known limitation** — revisit when a board needs them.
 
+### D14. Render-bound variables validated against `dct describe`
+Every path that can start a render (`POST /api/renders`, `/raw` render-on-miss
+and stale-while-revalidate, the `/b` shell) validates vars against the board's
+declared variables: unknown names, out-of-list options, and ill-typed
+date/number/checkbox values get 400; `describe` unavailable gets 502 (fail
+closed — unvalidated input never reaches the warehouse). Serving a cached
+artifact never validates (D5 asymmetry preserved). The request `format` is
+allowlisted (`RenderRequest` validator) and `new_artifact_path` re-checks it
+before building the on-disk path.
+**Why:** boards may interpolate vars raw into SQL; the hub can't quote for
+them, but it can shrink the injection surface to declared, typed inputs.
+Free-text vars remain the board author's quoting responsibility.
+
+### D15. Rendered artifacts served into a sandboxed origin
+`/raw/` and html/svg artifact responses carry `Content-Security-Policy:
+sandbox allow-scripts`, and the board iframe has `sandbox="allow-scripts"`. Chart JS
+runs, but artifacts execute in an opaque origin: no cookies, no storage, no
+API calls as the viewing user. The refresh button reloads the iframe by
+resetting its `src` from the parent — cross-origin `contentWindow.location`
+is off-limits. A baseline CSP + `X-Content-Type-Options` / `Referrer-Policy` /
+`X-Frame-Options` middleware covers everything else (`unsafe-inline` is
+unavoidable under D13).
+
+### D16. Opt-in per-identity render rate limit
+`policy.max_renders_per_minute` (default 0 = unlimited) caps render
+submissions per identity across auto and force — this is the bound on force's
+documented `min_interval_s` bypass. In-memory sliding window (single process,
+D10); resets on restart, acceptable for an abuse cap. Stale-while-revalidate
+over the limit skips the refresh and serves stale rather than failing the
+page. Default-off so existing cron/Airflow automation is unaffected.
+
 ## Packaging (air-gapped)
 
 ### D12. Hash verification at vendor time; version resolution at image build

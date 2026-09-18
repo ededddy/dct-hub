@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -71,8 +72,8 @@ def env(tmp_path, monkeypatch):
     app = create_app(config, oidc_http=oidc_http)
     fake = FakeDct()
     app.state.service.dct = fake
-    client = TestClient(app)
-    return client, fake, idp
+    with TestClient(app) as client:
+        yield client, fake, idp
 
 
 def login(client: TestClient, idp: FakeIdP, next_url: str = "/"):
@@ -109,6 +110,24 @@ def test_anonymous_api_requests_rejected(env):
 def test_bad_bearer_rejected(env):
     client, _, _ = env
     assert client.get("/api/boards", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+
+def test_auth_events_logged(env, caplog):
+    client, _, idp = env
+
+    with caplog.at_level(logging.WARNING, logger="dct_hub.auth"):
+        client.get("/api/boards", headers={"Authorization": "Bearer wrong"})
+    assert "unrecognized bearer token" in caplog.text
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO, logger="dct_hub.auth"):
+        login(client, idp)
+    assert "login:" in caplog.text
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="dct_hub.access"):
+        assert client.post("/api/renders", json={"board": "sales_daily"}).status_code == 403
+    assert "lacks 'refresh'" in caplog.text
 
 
 def test_service_token_can_refresh(env):

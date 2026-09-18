@@ -35,6 +35,10 @@ class PolicyConfig(BaseModel):
     # Parallel render workers. Forced to 1 when a persistent query cache is
     # configured (DuckDB single-writer limit).
     max_concurrent: int = 2
+    # Per-identity cap on render submissions per minute, across all triggers
+    # (auto and force — this bounds the force bypass of min_interval_s).
+    # 0 = unlimited (default); set it to contain automation and UI abuse.
+    max_renders_per_minute: int = 0
 
 
 class RetentionConfig(BaseModel):

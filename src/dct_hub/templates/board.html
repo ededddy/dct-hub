@@ -74,7 +74,7 @@
 {% endif %}
 
 <div class="frame-wrap">
-  <iframe id="frame" src="{{ raw_url }}" title="{{ title }}"></iframe>
+  <iframe id="frame" src="{{ raw_url }}" title="{{ title }}" sandbox="allow-scripts"></iframe>
 </div>
 
 {% if renders %}
@@ -135,7 +135,10 @@ if (btn) {
         const job = await (await fetch('/api/jobs/' + data.job_id)).json();
         if (job.status === 'done') {
           clearInterval(timer);
-          document.getElementById('frame').contentWindow.location.reload();
+          // the artifact is sandboxed into an opaque origin, so reload by
+          // resetting src from the parent — contentWindow.location is off-limits
+          const f = document.getElementById('frame');
+          f.src = f.src;
           statusEl.textContent = 'refreshed';
           btn.disabled = false;
           setTimeout(() => location.reload(), 800);

@@ -1,6 +1,7 @@
 """Artifact storage: rendered files on disk, render metadata in SQLite."""
 
 import json
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -82,6 +83,8 @@ class ArtifactStore:
             self._db.executescript(_SCHEMA)
 
     def new_artifact_path(self, board: str, key: str, fmt: str) -> Path:
+        if not re.fullmatch(r"[a-z0-9]+", fmt):
+            raise ValueError(f"unsafe artifact format: {fmt!r}")
         path = self.artifacts_dir / board / f"{key}.{fmt}"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
