@@ -115,4 +115,4 @@ while a first render runs; a one-shot guarded reload syncs the freshness badge
 afterwards. Favorites/recents live in localStorage — no per-user server state.
 `/raw/` responses carry `Cache-Control: no-cache` so refreshes show through.
 
-See `.agents/decisions.md` for the rationale behind the load-bearing choices.
+See `.agents/decisions/` for the rationale behind the load-bearing choices.
