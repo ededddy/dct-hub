@@ -37,6 +37,19 @@ class PolicyConfig(BaseModel):
     max_concurrent: int = 2
 
 
+class RetentionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Off by default: deleting artifacts is a deliberate opt-in.
+    enabled: bool = False
+    # Prune non-frozen artifacts older than this. Frozen snapshots are never
+    # pruned — immutability is their contract.
+    max_age_days: int = 30
+    # Keep at most this many non-frozen artifacts per board (newest first).
+    max_per_board: int = 100
+    sweep_interval_s: int = 3600
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -47,6 +60,7 @@ class Config(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     access: AccessConfig = Field(default_factory=AccessConfig)
 

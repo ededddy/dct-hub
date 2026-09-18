@@ -94,3 +94,25 @@ class CachePolicy:
             return False
         elapsed = (datetime.now(timezone.utc) - _parse_ts(last_activity_iso)).total_seconds()
         return elapsed < self.config.min_interval_s
+
+    async def frozen(self, board_file: Path, variables: dict[str, str]) -> bool | None:
+        """True if provably frozen, False if not, None if undecidable.
+
+        Unlike `freshness` (which degrades to TTL when describe fails), this
+        is for destructive decisions like retention pruning: None means "could
+        not classify, do not touch".
+        """
+        if not self.config.frozen_date_vars:
+            return False
+        try:
+            info = await self._describe(board_file)
+        except Exception:
+            return None
+        date_vars = {
+            v["name"]: (None if v.get("default") is None else str(v["default"]))
+            for v in info.get("variables", [])
+            if v.get("type") in DATE_INPUT_TYPES
+        }
+        if not date_vars:
+            return False
+        return self._all_in_past(date_vars, variables)

@@ -218,6 +218,18 @@ class ArtifactStore:
             ).fetchall()
         return {row[1]: self._to_record(row) for row in rows}
 
+    def all_renders(self) -> list[RenderRecord]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM renders WHERE status = 'ok' ORDER BY rendered_at DESC").fetchall()
+        return [self._to_record(row) for row in rows]
+
+    def delete_render(self, key: str) -> None:
+        with self._lock, self._db:
+            row = self._db.execute("SELECT artifact_path FROM renders WHERE key = ?", (key,)).fetchone()
+            self._db.execute("DELETE FROM renders WHERE key = ?", (key,))
+        if row:
+            Path(row[0]).unlink(missing_ok=True)
+
     def _to_job(self, row: tuple) -> JobRecord:
         return JobRecord(
             id=row[0],

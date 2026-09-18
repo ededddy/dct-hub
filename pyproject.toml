@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dct-hub"
-version = "0.4.0"
+version = "0.5.0"
 description = "On-demand rendering, snapshot cache, access control and catalog UI for dbt Charts (dct)"
 requires-python = ">=3.11"
 dependencies = [

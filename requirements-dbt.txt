@@ -1,0 +1,2 @@
+# Pinned alongside dct-hub in the deploy image. Bump deliberately.
+dbt-charts==0.8.0

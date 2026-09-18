@@ -11,6 +11,8 @@ artifacts are served: frozen (all date vars in the past → never re-render),
 fresh (within TTL), stale (served while a background refresh is enqueued).
 """
 
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -33,6 +35,7 @@ from .boards import (
 from .cachekey import artifact_key, board_fingerprint
 from .config import Config
 from .dct import Dct, DctError
+from .gc import RetentionSweeper
 from .policy import CachePolicy, Freshness
 from .queue import RenderQueue
 from .store import ArtifactStore, JobRecord, RenderRecord, utcnow_iso
@@ -187,14 +190,26 @@ def _job_json(job: JobRecord) -> dict:
 
 def create_app(config: Config, oidc_http=None) -> FastAPI:
     auth_on = config.auth.enabled
+    service = RenderService(config)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        service.queue.start()
+        sweeper = None
+        if config.retention.enabled:
+            sweeper = asyncio.create_task(RetentionSweeper(config, service.store, service.policy).run())
+        yield
+        if sweeper is not None:
+            sweeper.cancel()
+
     app = FastAPI(
         title="dct-hub",
-        version="0.3.0",
+        version="0.5.0",
+        lifespan=lifespan,
         docs_url=None if auth_on else "/docs",
         redoc_url=None if auth_on else "/redoc",
         openapi_url=None if auth_on else "/openapi.json",
     )
-    service = RenderService(config)
     app.state.service = service
     app.state.auth_config = config.auth
     app.state.policy = AccessPolicy(config.access) if auth_on else None

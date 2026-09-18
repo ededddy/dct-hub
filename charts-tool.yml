@@ -20,6 +20,12 @@ render:
 #   min_interval_s: 300      # min seconds between renders of one artifact
 #   max_concurrent: 2        # render workers (forced to 1 with query_cache)
 
+# retention:                 # artifact GC — opt-in (M5)
+#   enabled: true            # frozen snapshots are NEVER pruned
+#   max_age_days: 30         # prune non-frozen artifacts older than this
+#   max_per_board: 100       # keep newest N non-frozen artifacts per board
+#   sweep_interval_s: 3600
+
 # Access control — disabled for the local dev loop. To enable, set
 # auth.enabled: true and fill in your Keycloak realm. Boards redirect
 # unauthenticated browsers to SSO; API callers use Bearer service tokens.

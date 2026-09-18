@@ -4,10 +4,39 @@ Serving layer for [dbt Charts](https://docs.dbtcharts.com/) (`dct`): on-demand
 board rendering over HTTP, a content-addressed artifact cache (frozen snapshots
 for past dates, TTL for today), access control, and a catalog UI.
 
-Status: **M4** — M1 (render API, artifact store, cache keys) + M2 (Keycloak
-OIDC, service tokens, path-based grants) + M3 (async render queue, frozen/TTL
-freshness policy, stale-while-revalidate) + the catalog UI. Remaining: M5
-(Docker packaging for air-gapped deploy).
+Status: **M5** — full feature set: render API + artifact cache (M1), access
+control (M2), render queue + freshness policy (M3), catalog UI (M4), and
+air-gapped packaging + retention (M5).
+
+## Deployment (air-gapped)
+
+On a networked machine, vendor the dependencies (locked with hashes; sdists
+pre-built to wheels), then build the image — no index access needed:
+
+```bash
+scripts/vendor_wheels.sh        # -> requirements.lock, wheels/, dist/
+docker build -t dct-hub .
+```
+
+Run it with your project and config mounted (state persists in a volume):
+
+```bash
+docker run -p 8080:8080 \
+  -v $PWD/charts-tool.yml:/config/charts-tool.yml:ro \
+  -v $PWD/my-dct-project:/project \
+  -v dct-hub-data:/state \
+  dct-hub
+```
+
+In `charts-tool.yml`, point `project_dir` at `/project` and `storage.dir` at
+`/state`. Warehouse credentials go through environment variables (`-e` /
+secrets), never in the config. ARM builds: `PLATFORM=aarch64-unknown-linux-gnu
+PLATFORM_ARCH=aarch64 scripts/vendor_wheels.sh`.
+
+Retention is off by default; enable the sweeper in config to prune non-frozen
+artifacts by age (`max_age_days`) and count (`max_per_board`). Frozen
+snapshots are never pruned, and an unclassifiable artifact (e.g. `dct
+describe` failing mid-sweep) is always kept — pruning fails safe.
 
 ## UI
 
