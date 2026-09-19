@@ -61,13 +61,14 @@ def test_render_rate_limit_429(tmp_path):
         assert len(fake.renders) == 2
 
 
-def test_rate_limit_default_unlimited(tmp_path):
+def test_rate_limit_default_capped(tmp_path):
+    # default policy caps each identity at 30 renders/min (0 opts back into unlimited)
     client, fake = make_client(tmp_path)
     with client:
-        for _ in range(4):
-            resp = client.post("/api/renders", json={"board": "sales_daily", "force": True, "wait": True})
-            assert resp.status_code == 200
-        assert len(fake.renders) == 4
+        for _ in range(30):
+            resp = client.post("/api/renders", json={"board": "sales_daily", "force": True})
+            assert resp.status_code == 202
+        assert client.post("/api/renders", json={"board": "sales_daily", "force": True}).status_code == 429
 
 
 def test_stale_served_without_refresh_over_limit(tmp_path):

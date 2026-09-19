@@ -64,8 +64,9 @@ class PolicyConfig(BaseModel):
     max_concurrent: int = 2
     # Per-identity cap on render submissions per minute, across all triggers
     # (auto and force — this bounds the force bypass of min_interval_s).
-    # 0 = unlimited (default); set it to contain automation and UI abuse.
-    max_renders_per_minute: int = 0
+    # Default 30; 0 = unlimited. Deploy-pipeline warming spends the same
+    # budget — raise the cap if your warm list is long.
+    max_renders_per_minute: int = 30
 
 
 class RetentionConfig(BaseModel):
