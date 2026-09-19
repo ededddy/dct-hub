@@ -59,7 +59,10 @@ variables), freshness badge (frozen snapshot / fresh / stale), a refresh
 button shown only with the `refresh` grant, and snapshot history with links to
 earlier variable combinations. The rendered artifact loads in an iframe from
 `/raw/<board>` (the M1–M3 artifact endpoint moved there; `/b/` is now the
-shell). All assets are inline — no CDN, air-gap safe.
+shell). The shell follows the OS light/dark theme with a manual override in
+the header, and the board page has an Auto/Light/Dark backdrop switcher behind
+the iframe so differently-themed artifacts sit well; both choices persist
+client-side. All assets are inline — no CDN, air-gap safe.
 
 ## Quickstart
 

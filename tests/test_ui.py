@@ -103,6 +103,19 @@ def test_board_shell_frozen_badge_and_history(tmp_path):
         assert "artifact bytes" in raw.text
 
 
+def test_theme_and_canvas_hooks(tmp_path):
+    with TestClient(make_app(tmp_path, UiFakeDct())) as client:
+        home = client.get("/")
+        assert "dct-hub:theme" in home.text  # pre-paint theme init
+        assert 'id="theme-toggle"' in home.text
+        assert 'data-theme="dark"' in home.text  # dark token block in CSS
+        assert 'class="card-link"' in home.text  # whole card is clickable
+        page = client.get("/b/sales_daily")
+        assert 'id="canvas-switch"' in page.text
+        assert "dct-hub:canvas" in page.text
+        assert 'id="frame-loading"' in page.text  # loading veil until artifact paints
+
+
 AUTH_ON = {
     "enabled": True,
     "session_secret": "ui-test-secret",

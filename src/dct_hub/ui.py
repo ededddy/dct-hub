@@ -145,7 +145,7 @@ def register_ui(app: FastAPI, service: "RenderService", config, identity_of, aut
             freshness, freshness_class = {
                 Freshness.FROZEN: ("frozen snapshot", "frozen"),
                 Freshness.FRESH: ("fresh", "fresh"),
-                Freshness.STALE: ("stale — refresh runs in background", "stale"),
+                Freshness.STALE: ("stale - refresh runs in background", "stale"),
             }.get(level, (None, "never"))
 
         can_refresh = policy is None or policy.allows(identity, "refresh", board)
