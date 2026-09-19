@@ -99,3 +99,17 @@ def test_stale_served_when_vars_unvalidatable(tmp_path):
         assert client.get("/raw/sales_daily").status_code == 200
         time.sleep(0.1)
         assert len(fake.renders) == 1
+
+
+def test_hits_map_is_bounded(monkeypatch):
+    from collections import deque
+
+    limiter = RateLimiter(1)
+    t = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: t[0])
+    assert asyncio.run(limiter.allow("alice")) is True
+    t[0] += 120  # everything recorded before this is now outside the window
+    for i in range(10_001):
+        limiter._hits[f"old{i}"] = deque([t[0] - 120])
+    assert asyncio.run(limiter.allow("bob")) is True  # triggers the sweep
+    assert len(limiter._hits) <= 2  # stale windows (including alice's) dropped

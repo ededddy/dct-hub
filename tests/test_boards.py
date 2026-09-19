@@ -43,3 +43,20 @@ def test_list_boards_skips_meta_and_partials(tmp_path):
 
     boards = list_boards(charts)
     assert [(b.board, b.title, b.notes) for b in boards] == [("a", "Board A", "first")]
+
+
+def test_resolve_rejects_case_mismatched_ref(tmp_path):
+    charts = tmp_path / "charts"
+    charts.mkdir()
+    (charts / "Q4.yml").write_text("title: Q4\n")
+    # case-sensitive fs: no such file. case-insensitive fs (APFS/Windows):
+    # the file resolves but the ref must not shadow a differently-cased grant.
+    with pytest.raises((InvalidBoardRef, BoardNotFoundError)):
+        resolve_board_file(charts, "q4")
+
+
+def test_resolve_rejects_nul_byte(tmp_path):
+    charts = tmp_path / "charts"
+    charts.mkdir()
+    with pytest.raises((InvalidBoardRef, BoardNotFoundError)):
+        resolve_board_file(charts, "a\x00b")

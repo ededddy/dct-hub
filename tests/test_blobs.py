@@ -58,3 +58,19 @@ def test_locator_format():
     assert artifact_locator("finance/q4", "abc123", "html") == "finance/q4/abc123.html"
     with pytest.raises(ValueError):
         artifact_locator("b", "k", "ht ml")
+
+
+def test_locator_rejects_unsafe_board():
+    for bad in ("/abs", "..", "a/../b", "a//b", "a\\b", "."):
+        with pytest.raises(ValueError):
+            artifact_locator(bad, "k", "html")
+
+
+def test_localblobs_rejects_escaping_locator(tmp_path):
+    blobs = LocalBlobs(tmp_path / "artifacts")
+    with pytest.raises(ValueError):
+        run(blobs.exists("../escape.txt"))
+    with pytest.raises(ValueError):
+        run(blobs.delete("/etc/passwd"))
+    with pytest.raises(ValueError):
+        read_all(blobs, "..")

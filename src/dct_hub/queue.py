@@ -82,7 +82,10 @@ class RenderQueue:
             duration_ms=None,
         )
         job, created = await self.store.submit_job(job)
-        self._done.setdefault(job.id, asyncio.Event())
+        # No _done entry here: waiters create their own in wait(), and the
+        # worker pops it when it finishes the job. Registering one per
+        # submission would leak an entry for every cross-node (HA) job and
+        # every submit-and-forget 202.
         if created and self._wake is not None:
             self._wake.set()
         return job, created
@@ -91,20 +94,25 @@ class RenderQueue:
         await self.start()
         deadline = time.monotonic() + timeout_s
         job = await self.store.get_job(job_id)
-        while job is not None and job.status not in TERMINAL_STATUSES:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            event = self._done.setdefault(job_id, asyncio.Event())
-            try:
-                # The event fires instantly when a local worker finishes the
-                # job; the timeout is the poll that catches jobs finished by
-                # other replicas.
-                await asyncio.wait_for(event.wait(), min(WAIT_POLL_S, remaining))
-            except asyncio.TimeoutError:
-                pass
-            job = await self.store.get_job(job_id)
-        return job
+        try:
+            while job is not None and job.status not in TERMINAL_STATUSES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                event = self._done.setdefault(job_id, asyncio.Event())
+                try:
+                    # The event fires instantly when a local worker finishes the
+                    # job; the timeout is the poll that catches jobs finished by
+                    # other replicas.
+                    await asyncio.wait_for(event.wait(), min(WAIT_POLL_S, remaining))
+                except asyncio.TimeoutError:
+                    pass
+                job = await self.store.get_job(job_id)
+            return job
+        finally:
+            # Cross-node (HA) jobs finish without the local worker popping
+            # this node's entry — never leave one behind.
+            self._done.pop(job_id, None)
 
     async def _worker(self) -> None:
         assert self._wake is not None
