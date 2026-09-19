@@ -43,8 +43,8 @@ artifact is FROZEN/FRESH, return `cached` → else submit a job (202 + `job_id`;
 `GET /b/<board>` returns a shell page instantly (controls, badges, history).
 The shell never renders. Its iframe loads `GET /raw/<board>`, which is where
 render-on-miss (requires `refresh` grant) and stale-while-revalidate live:
-a STALE artifact is served immediately and a background refresh is enqueued,
-bounded by `min_interval_s`.
+a STALE artifact is served immediately, and a background refresh is enqueued
+for callers holding the `refresh` grant, bounded by `min_interval_s`.
 
 **Refresh button (UI):** POST force render → poll `GET /api/jobs/{id}` →
 reload iframe on `done`. The button exists only for identities with the
@@ -71,8 +71,9 @@ Freshness state machine per artifact (policy.py):
   defaults included) is in the past → immutable, TTL does not apply.
   Yesterday's snapshot is rendered once and served forever.
 - **FRESH** — younger than `policy.default_ttl_s` → served.
-- **STALE** — older → served while a background refresh runs
-  (rate-limited by `min_interval_s`; `force: true` bypasses).
+- **STALE** — older → served immediately; a background refresh is enqueued
+  when the caller holds the `refresh` grant (rate-limited by `min_interval_s`;
+  `force: true` bypasses).
 - describe unavailable → degrade to TTL (serving never depends on policy
   metadata); the retention sweeper uses a stricter tri-state (`policy.frozen()`)
   so it never prunes what it can't classify.
