@@ -2,26 +2,49 @@
 {% block title %}Boards · dct-hub{% endblock %}
 {% block content %}
 <style>
-  .search { display: flex; gap: 8px; margin: 8px 0 20px; }
-  .search input { flex: 1; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; background: var(--card); }
+  .search { display: flex; gap: 8px; margin: 4px 0 20px; }
+  .search input { flex: 1; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px;
+                  font-size: 14px; background: var(--card); color: var(--ink);
+                  transition: border-color .15s ease, background-color .2s ease; }
+  .search input::placeholder { color: var(--muted); }
+  .search input:focus { border-color: var(--accent); outline: none; }
   .folder { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em;
-            text-transform: uppercase; margin: 22px 0 8px; }
+            text-transform: uppercase; margin: 24px 0 10px; display: flex; align-items: baseline; gap: 8px; }
+  .folder .count { font-weight: 600; letter-spacing: 0; text-transform: none; opacity: .7; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; position: relative; }
-  .card:hover { border-color: #c4cdd9; }
-  .card h3 { margin: 0 0 4px; font-size: 15px; }
-  .card h3 a { color: var(--ink); }
-  .card .notes { color: var(--muted); font-size: 13px; margin: 0 0 10px;
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; position: relative;
+          transition: border-color .15s ease, background-color .2s ease; }
+  .card:hover { border-color: var(--line-strong); }
+  .card:hover h3 a { color: var(--accent); }
+  .card:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .card:active { transform: translateY(1px); }
+  .card h3 { margin: 0 0 4px; font-size: 15px; letter-spacing: -0.01em; }
+  .card h3 a { color: var(--ink); outline: none; }
+  /* stretched link: the whole card navigates, text stays real and the title
+     keeps its accessible name; interactive children sit above via z-index */
+  .card-link::after { content: ""; position: absolute; inset: 0; border-radius: 10px; }
+  .card .notes { color: var(--muted); font-size: 13px; margin: 0 0 12px;
                  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .card .meta { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12.5px; }
-  .fav { position: absolute; top: 10px; right: 12px; border: 0; background: none; cursor: pointer;
-         font-size: 15px; color: #d0d5dd; padding: 2px; }
-  .fav.on { color: #f79009; }
+  .card .meta { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+                color: var(--muted); font-size: 12.5px; }
+  .fav { position: absolute; top: 10px; right: 12px; z-index: 1; border: 0; background: none;
+         cursor: pointer; font-size: 15px; line-height: 1; color: var(--line-strong); padding: 2px;
+         transition: color .15s ease; }
+  .fav:hover { color: var(--star); }
+  .fav.on { color: var(--star); }
   .section-title { font-size: 13px; font-weight: 700; color: var(--muted); margin: 0 0 8px; }
   #recents, #favorites { margin-bottom: 8px; }
   .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
-  .pill { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; font-size: 13px; color: var(--ink); }
-  .empty { color: var(--muted); margin-top: 40px; text-align: center; }
+  .pill { background: var(--card); border: 1px solid var(--line); border-radius: 999px;
+          padding: 5px 12px; font-size: 13px; color: var(--ink);
+          transition: border-color .15s ease; }
+  .pill:hover { border-color: var(--line-strong); text-decoration: none; }
+  .filter-empty, .empty { color: var(--muted); text-align: center; padding: 64px 20px; }
+  @media (max-width: 768px) {
+    .search { margin-top: 0; }
+    .grid { grid-template-columns: 1fr; }
+  }
 </style>
 
 <form class="search" method="get" action="/">
@@ -38,13 +61,15 @@
   <div class="pill-row" id="recent-pills"></div>
 </div>
 
+<p class="filter-empty" id="filter-empty" hidden>No boards here match that filter.</p>
+
 {% for folder, cards in groups %}
-  {% if folder %}<p class="folder">{{ folder }}</p>{% endif %}
+  {% if folder %}<p class="folder">{{ folder }}<span class="count">{{ cards | length }}</span></p>{% endif %}
   <div class="grid">
     {% for c in cards %}
     <div class="card">
       <button class="fav" data-board="{{ c.board }}" title="favorite">★</button>
-      <h3><a href="{{ c.url }}">{{ c.title }}</a></h3>
+      <h3><a class="card-link" href="{{ c.url }}">{{ c.title }}</a></h3>
       <p class="notes">{{ c.notes }}</p>
       <div class="meta">
         <span class="mono">{{ c.board }}</span>
@@ -98,5 +123,36 @@ document.querySelectorAll('.fav').forEach(btn => {
     store.set(FAVS, list); sync();
   });
 });
+
+// instant client-side filter over the rendered cards (Enter still runs the
+// server-side dct search); folder headers hide when all their cards do
+(() => {
+  const input = document.querySelector('.search input[name="q"]');
+  if (!input) return;
+  const cards = [...document.querySelectorAll('.grid .card')];
+  const emptyNote = document.getElementById('filter-empty');
+  input.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    let visible = 0;
+    cards.forEach(card => {
+      const show = !q || card.textContent.toLowerCase().includes(q);
+      card.hidden = !show;
+      if (show) visible++;
+    });
+    document.querySelectorAll('.folder').forEach(f => {
+      const grid = f.nextElementSibling;
+      if (grid && grid.classList.contains('grid'))
+        f.hidden = !grid.querySelector('.card:not([hidden])');
+    });
+    if (emptyNote) emptyNote.hidden = visible > 0 || cards.length === 0;
+  });
+  document.addEventListener('keydown', e => {
+    const tag = (document.activeElement || {}).tagName || '';
+    if (e.key === '/' && !/INPUT|SELECT|TEXTAREA/.test(tag)) {
+      e.preventDefault();
+      input.focus();
+    }
+  });
+})();
 </script>
 {% endblock %}
