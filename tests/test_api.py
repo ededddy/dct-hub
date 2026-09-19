@@ -169,6 +169,8 @@ def test_security_headers(client):
     assert resp.headers["referrer-policy"] == "same-origin"
     assert resp.headers["x-frame-options"] == "SAMEORIGIN"
     assert "default-src 'self'" in resp.headers["content-security-policy"]
+    assert "object-src 'none'" in resp.headers["content-security-policy"]
+    assert "base-uri 'none'" in resp.headers["content-security-policy"]
 
     client.post("/api/renders", json={"board": "sales_daily", "wait": True})
     raw = client.get("/raw/sales_daily")
@@ -209,3 +211,25 @@ def test_e2e_real_dct_render():
             assert "<" in view.text
     finally:
         shutil.rmtree(state_dir, ignore_errors=True)
+
+
+def test_jobs_limit_validation(client):
+    client, _ = client
+    assert client.get("/api/jobs?limit=0").status_code == 422
+    assert client.get("/api/jobs?limit=-1").status_code == 422
+    assert client.get("/api/jobs?limit=501").status_code == 422
+    assert client.get("/api/jobs?limit=1").status_code == 200
+
+
+def test_var_value_length_cap(client):
+    client, _ = client
+    resp = client.post("/api/renders", json={"board": "sales_daily", "vars": {"region": "E" * 5000}})
+    assert resp.status_code == 400
+    assert "too long" in resp.json()["detail"]
+
+
+def test_oversized_body_rejected(client):
+    client, _ = client
+    payload = b'{"board": "sales_daily", "vars": {"region": "' + b"x" * (1024 * 1024 + 64) + b'"}}'
+    resp = client.post("/api/renders", content=payload, headers={"content-type": "application/json"})
+    assert resp.status_code == 413

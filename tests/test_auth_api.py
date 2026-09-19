@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from dct_hub.api import create_app
 from dct_hub.config import Config
-from dct_hub.dct import RenderResult
+from dct_hub.dct import DctError, RenderResult
 
 from fake_idp import CLIENT_ID, ISSUER, FakeIdP
 
@@ -51,8 +52,7 @@ ACCESS_CONFIG = {
 }
 
 
-@pytest.fixture
-def env(tmp_path, monkeypatch):
+def build_authed(tmp_path, monkeypatch, policy=None):
     monkeypatch.setenv("DCT_HUB_TEST_TOKEN", "env-token")
     charts = tmp_path / "proj" / "charts"
     (charts / "finance").mkdir(parents=True)
@@ -63,15 +63,19 @@ def env(tmp_path, monkeypatch):
 
     idp = FakeIdP()
     oidc_http = httpx.AsyncClient(transport=httpx.ASGITransport(app=idp.app()))
-    config = Config(
-        project_dir=tmp_path / "proj",
-        storage={"dir": tmp_path / ".hub"},
-        auth=AUTH_CONFIG,
-        access=ACCESS_CONFIG,
-    )
+    kwargs = {"auth": AUTH_CONFIG, "access": ACCESS_CONFIG}
+    if policy is not None:
+        kwargs["policy"] = policy
+    config = Config(project_dir=tmp_path / "proj", storage={"dir": tmp_path / ".hub"}, **kwargs)
     app = create_app(config, oidc_http=oidc_http)
     fake = FakeDct()
     app.state.service.dct = fake
+    return app, fake, idp
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    app, fake, idp = build_authed(tmp_path, monkeypatch)
     with TestClient(app) as client:
         yield client, fake, idp
 
@@ -259,3 +263,93 @@ def test_id_token_without_exp_rejected(env):
 def test_logout_requires_post(env):
     client, _, _ = env
     assert client.get("/auth/logout", follow_redirects=False).status_code == 405
+
+
+def poll_job(client, job_id, headers=None):
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job_id}", headers=headers or {}).json()
+        if job["status"] in ("done", "error", "interrupted"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError("job did not finish")
+
+
+def test_job_error_hidden_from_viewers(env):
+    client, _, idp = env
+
+    class FailDct(FakeDct):
+        async def render(self, board_file, variables, output, fmt):
+            raise DctError("boom", stderr="query exploded: schema secret_analytics")
+
+    client.app.state.service.dct = FailDct()
+    resp = client.post(
+        "/api/renders",
+        json={"board": "sales_daily"},
+        headers={"Authorization": "Bearer ci-token"},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    job = poll_job(client, job_id, {"Authorization": "Bearer ci-token"})
+    assert job["status"] == "error"
+    assert "query exploded" in job["error"]  # operators keep the detail
+
+    login(client, idp)  # data group: view-only
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "error"
+    assert job["error"] is None  # viewers get no stderr
+    jobs = client.get("/api/jobs").json()
+    assert jobs[0]["error"] is None
+
+
+def test_stale_refresh_requires_refresh_grant(tmp_path, monkeypatch):
+    app, fake, idp = build_authed(tmp_path, monkeypatch, policy={"default_ttl_s": 0, "min_interval_s": 0})
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/renders",
+            json={"board": "sales_daily", "wait": True},
+            headers={"Authorization": "Bearer ci-token"},
+        )
+        assert resp.status_code == 200
+        assert len(fake.renders) == 1
+
+        # TTL 0: immediately stale. A viewer is served the stale artifact but
+        # no background render is enqueued.
+        idp.user = {"sub": "u-bob", "name": "Bob", "email": "bob@corp.test", "groups": ["data"]}
+        login(client, idp)
+        assert client.get("/raw/sales_daily").status_code == 200
+        time.sleep(0.4)
+        assert len(fake.renders) == 1
+
+        # an operator's view enqueues the background refresh
+        assert client.get("/raw/sales_daily", headers={"Authorization": "Bearer ci-token"}).status_code == 200
+        deadline = time.monotonic() + 5
+        while len(fake.renders) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(fake.renders) == 2
+
+
+def test_render_key_and_job_existence_not_oracle(env):
+    client, _, idp = env
+    idp.user = {"sub": "u-cara", "name": "Cara", "email": "cara@corp.test", "groups": ["finance"]}
+    login(client, idp)
+    resp = client.post("/api/renders", json={"board": "finance/q4", "wait": True})
+    assert resp.status_code == 200
+    key = resp.json()["key"]
+    job_id = resp.json()["job_id"]
+    client.post("/auth/logout")
+
+    # ci (data-ops): the finance/* carve-out shadows its * grant, so it has no
+    # view on finance/q4. Unauthorized must look exactly like unknown.
+    ci = {"Authorization": "Bearer ci-token"}
+    unknown_key = client.get("/api/renders/" + "0" * 16, headers=ci)
+    forbidden_key = client.get(f"/api/renders/{key}", headers=ci)
+    assert unknown_key.status_code == forbidden_key.status_code == 404
+    # identical message shape (the only difference is the caller-supplied key)
+    assert unknown_key.json()["detail"].startswith("unknown render key:")
+    assert forbidden_key.json()["detail"].startswith("unknown render key:")
+
+    unknown_job = client.get("/api/jobs/" + "0" * 16, headers=ci)
+    forbidden_job = client.get(f"/api/jobs/{job_id}", headers=ci)
+    assert unknown_job.status_code == forbidden_job.status_code == 404
+    assert unknown_job.json()["detail"].startswith("unknown job:")
+    assert forbidden_job.json()["detail"].startswith("unknown job:")

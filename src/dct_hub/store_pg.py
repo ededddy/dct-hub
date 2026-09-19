@@ -236,6 +236,7 @@ class PgStore:
         return int(result.split()[-1])
 
     async def list_jobs(self, limit: int = 50) -> list[JobRecord]:
+        limit = max(1, min(int(limit), 1000))
         rows = await self.pool.fetch(
             f"SELECT {_JOB_COLS} FROM jobs ORDER BY created_at DESC, id DESC LIMIT $1", limit
         )

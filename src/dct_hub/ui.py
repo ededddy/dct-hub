@@ -6,6 +6,7 @@ which loads in an iframe from /raw/{board} so the shell stays fast while a
 first render is still running.
 """
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,6 +22,8 @@ from .policy import Freshness
 
 if TYPE_CHECKING:
     from .api import RenderService
+
+logger = logging.getLogger("dct_hub.ui")
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -136,7 +139,8 @@ def register_ui(app: FastAPI, service: "RenderService", config, identity_of, aut
         try:
             describe = await service.describe_cached(board_file)
         except DctError as exc:
-            raise HTTPException(status_code=502, detail=exc.stderr[-1000:])
+            logger.warning("dct describe failed for %s: %s", board_file, exc.stderr[-1000:])
+            raise HTTPException(status_code=502, detail="dct describe failed; see server logs")
 
         freshness = None
         freshness_class = "never"
