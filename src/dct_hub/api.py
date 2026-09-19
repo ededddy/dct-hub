@@ -8,17 +8,19 @@ OIDC login; API callers get 401/403 JSON.
 Renders run through an async queue (`POST /api/renders` returns 202 with a job
 id; `wait: true` blocks until done). Freshness policy decides when existing
 artifacts are served: frozen (all date vars in the past → never re-render),
-fresh (within TTL), stale (served while a background refresh is enqueued).
+fresh (within TTL), stale (served at once; a background refresh is enqueued
+when the caller holds the refresh grant).
 """
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.sessions import SessionMiddleware
@@ -57,6 +59,15 @@ MEDIA_TYPES = {
 # but the artifact gets no cookies, no storage, and no API access as the
 # viewing user — a malicious or compromised board can't act for them.
 SANDBOX_CSP = "sandbox allow-scripts"
+
+logger = logging.getLogger("dct_hub.api")
+
+# Request bodies are small JSON payloads; anything larger is rejected before
+# it is read into memory.
+MAX_BODY_BYTES = 1024 * 1024
+# Variable values end up in subprocess argv and the jobs table; cap both axes.
+MAX_VARS = 64
+MAX_VAR_VALUE_LEN = 4096
 
 
 class RenderRequest(BaseModel):
@@ -116,6 +127,8 @@ class RenderService:
             from .store_pg import PgRateLimiter, PgStore
 
             self.store = PgStore(config.storage.postgres)
+            if config.storage.s3.endpoint_url and not config.storage.s3.endpoint_url.startswith("https://"):
+                logger.warning("storage.s3.endpoint_url is not https: S3 credentials are sent unencrypted")
             self.blobs = S3Blobs(
                 bucket=config.storage.s3.bucket,
                 prefix=config.storage.s3.prefix,
@@ -168,10 +181,13 @@ class RenderService:
         author's duty. Serving a cached artifact never validates: it runs no
         queries, so it must not break (D5).
         """
+        if len(variables) > MAX_VARS:
+            raise HTTPException(status_code=400, detail=f"too many variables (max {MAX_VARS})")
         try:
             info = await self.describe_cached(board_file)
         except DctError as exc:
-            raise HTTPException(status_code=502, detail=f"cannot validate variables: {exc.stderr[-500:]}")
+            logger.warning("dct describe failed for %s: %s", board_file, exc.stderr[-1000:])
+            raise HTTPException(status_code=502, detail="cannot validate variables: dct describe failed; see server logs")
         declared = {v["name"]: v for v in info.get("variables", [])}
         unknown = sorted(set(variables) - set(declared))
         if unknown:
@@ -180,6 +196,8 @@ class RenderService:
                 detail=f"unknown variable(s) {unknown}; declared: {sorted(declared)}",
             )
         for name, value in variables.items():
+            if len(value) > MAX_VAR_VALUE_LEN:
+                raise HTTPException(status_code=400, detail=f"{name}: value too long (max {MAX_VAR_VALUE_LEN} chars)")
             spec = declared[name]
             options = [str(o) for o in (spec.get("options") or [])]
             kind = spec.get("type") or ""
@@ -234,9 +252,9 @@ class RenderService:
     async def execute_render(self, job: JobRecord) -> RenderRecord:
         # Only successful renders enter the renders table: a failed refresh must
         # never displace the last good artifact. Failures are recorded on the job.
-        _, board_file = self._resolve(job.board)
+        board, board_file = self._resolve(job.board)
         dct_version = await self.dct.version()
-        locator = artifact_locator(job.board, job.key, job.format)
+        locator = artifact_locator(board, job.key, job.format)
         staging = self.blobs.staging_path(locator)
         try:
             result = await self.dct.render(board_file, job.variables, staging, job.format)
@@ -248,7 +266,7 @@ class RenderService:
             staging.unlink(missing_ok=True)
         record = RenderRecord(
             key=job.key,
-            board=job.board,
+            board=board,
             variables=job.variables,
             format=job.format,
             artifact_path=locator,
@@ -334,7 +352,7 @@ def _render_response(record: RenderRecord | None, key: str, board: str, variable
     )
 
 
-def _job_json(job: JobRecord) -> dict:
+def _job_json(job: JobRecord, include_error: bool = True) -> dict:
     return {
         "id": job.id,
         "key": job.key,
@@ -343,7 +361,8 @@ def _job_json(job: JobRecord) -> dict:
         "format": job.format,
         "status": job.status,
         "mode": job.mode,
-        "error": job.error,
+        # stderr carries warehouse internals: only render-capable callers see it
+        "error": job.error if include_error else None,
         "requested_by": job.requested_by,
         "created_at": job.created_at,
         "started_at": job.started_at,
@@ -381,6 +400,8 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
     app.state.service = service
     app.state.auth_config = config.auth
     app.state.policy = AccessPolicy(config.access) if auth_on else None
+    if auth_on and not config.auth.session_https_only:
+        logger.warning("auth.session_https_only is false: session cookies are not limited to HTTPS")
 
     if auth_on:
         app.add_middleware(
@@ -401,6 +422,13 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
                 raise HTTPException(status_code=400, detail="OIDC not configured; authenticate with a Bearer token")
 
     @app.middleware("http")
+    async def limit_request_body(request: Request, call_next):
+        length = request.headers.get("content-length")
+        if length is not None and length.isdigit() and int(length) > MAX_BODY_BYTES:
+            return JSONResponse({"detail": "request body too large"}, status_code=413)
+        return await call_next(request)
+
+    @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         # setdefault: artifact routes override CSP with a stricter sandbox one.
@@ -411,7 +439,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-            "img-src 'self' data:; frame-ancestors 'self'",
+            "img-src 'self' data:; frame-ancestors 'self'; object-src 'none'; base-uri 'none'",
         )
         return response
 
@@ -467,7 +495,7 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
                 record = await service.store.get(key)
                 return _render_response(record, key, board, variables, request.format, "done", job=job)
             if job and job.status == "error":
-                raise HTTPException(status_code=502, detail=f"dct render failed: {(job.error or '')[-1000:]}")
+                raise HTTPException(status_code=502, detail="dct render failed; see server logs")
         response.status_code = 202
         return _render_response(record, key, board, variables, request.format, job.status if job else "queued", job=job)
 
@@ -517,9 +545,11 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         if app.state.policy is not None and identity is None:
             raise Unauthenticated()
         record = await service.store.get(key)
-        if record is None:
+        if record is None or (
+            app.state.policy is not None and not app.state.policy.allows(identity, "view", record.board)
+        ):
+            # same 404 for unknown and unauthorized keys: no existence oracle
             raise HTTPException(status_code=404, detail=f"unknown render key: {key}")
-        require(app.state.policy, identity, "view", record.board)
         return {
             "key": record.key,
             "board": record.board,
@@ -540,7 +570,9 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         record = await service.store.get(key)
         if record is None or record.status != "ok" or not await service.blobs.exists(record.artifact_path):
             raise HTTPException(status_code=404, detail=f"no artifact for render key: {key}")
-        require(app.state.policy, identity, "view", record.board)
+        if app.state.policy is not None and not app.state.policy.allows(identity, "view", record.board):
+            # same 404 as a missing key: no existence oracle
+            raise HTTPException(status_code=404, detail=f"no artifact for render key: {key}")
         # html and svg are both script-capable when opened as a document
         headers = {"Content-Security-Policy": SANDBOX_CSP} if record.format in ("html", "svg") else None
         return StreamingResponse(
@@ -549,15 +581,19 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
             headers=headers,
         )
 
+    def may_see_error(identity: Identity | None, board: str) -> bool:
+        # Job errors carry dct/warehouse stderr: only render-capable callers.
+        return app.state.policy is None or app.state.policy.allows(identity, "refresh", board)
+
     @app.get("/api/jobs")
-    async def jobs(request: Request, limit: int = 50) -> list[dict]:
+    async def jobs(request: Request, limit: int = Query(default=50, ge=1, le=500)) -> list[dict]:
         identity = identity_of(request)
         if app.state.policy is not None and identity is None:
             raise Unauthenticated()
         all_jobs = await service.store.list_jobs(limit)
         if app.state.policy is not None:
             all_jobs = [j for j in all_jobs if app.state.policy.allows(identity, "view", j.board)]
-        return [_job_json(j) for j in all_jobs]
+        return [_job_json(j, may_see_error(identity, j.board)) for j in all_jobs]
 
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str, request: Request) -> dict:
@@ -565,10 +601,12 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         if app.state.policy is not None and identity is None:
             raise Unauthenticated()
         job = await service.store.get_job(job_id)
-        if job is None:
+        if job is None or (
+            app.state.policy is not None and not app.state.policy.allows(identity, "view", job.board)
+        ):
+            # same 404 for unknown and unauthorized ids: no existence oracle
             raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
-        require(app.state.policy, identity, "view", job.board)
-        return _job_json(job)
+        return _job_json(job, may_see_error(identity, job.board))
 
     @app.get("/api/boards")
     async def boards(request: Request) -> list[dict]:
@@ -588,7 +626,8 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
         try:
             return await service.dct.describe(board_file)
         except DctError as exc:
-            raise HTTPException(status_code=502, detail=exc.stderr[-1000:])
+            logger.warning("dct describe failed for %s: %s", board_file, exc.stderr[-1000:])
+            raise HTTPException(status_code=502, detail="dct describe failed; see server logs")
 
     @app.get("/raw/{board:path}")
     async def raw_board(board: str, request: Request) -> StreamingResponse:
@@ -608,14 +647,17 @@ def create_app(config: Config, oidc_http=None) -> FastAPI:
             )
             job = await service.queue.wait(job.id, timeout_s=config.render.timeout_s + 15)
             if job is not None and job.status == "error":
-                raise HTTPException(status_code=502, detail=f"dct render failed: {(job.error or '')[-1000:]}")
+                raise HTTPException(status_code=502, detail="dct render failed; see server logs")
             record = service._usable(await service.store.get(key))
             if record is None:
                 raise HTTPException(status_code=504, detail="render still in progress; retry shortly")
         else:
             freshness = await service.policy.freshness(board_file, fingerprint, variables, record)
+            # Stale-while-revalidate runs warehouse queries, so it follows the
+            # documented capability split: enqueued only for refresh grantees.
             if (
                 freshness == Freshness.STALE
+                and (app.state.policy is None or app.state.policy.allows(identity, "refresh", board))
                 and not service.policy.within_min_interval(await service.store.last_activity(key))
                 and await service.store.active_job_for_key(key) is None
                 and await service.rate_limiter.allow(identity.sub if identity else "anon")

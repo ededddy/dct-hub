@@ -262,6 +262,7 @@ class LocalStore:
             return cursor.rowcount
 
     async def list_jobs(self, limit: int = 50) -> list[JobRecord]:
+        limit = max(1, min(int(limit), 1000))
         with self._lock:
             rows = self._db.execute("SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)).fetchall()
         return [self._to_job(row) for row in rows]
