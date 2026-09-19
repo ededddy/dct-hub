@@ -14,6 +14,11 @@
 # theme: paper            # apply a built-in or custom theme to every dashboard
 # source: my_warehouse    # default data source for boards that don't name one
 #
-# style:
-#   frame:
-#     max_width: 1000
+# A board renders as one SVG that the host page scales to fit the window: at
+# the engine's 1200 default, a phone shows it at ~0.3x and axis text turns
+# unreadable. Capping the width to 800 keeps charts a comfortable size on
+# desktop while a phone downscales to ~0.45x — pair it with full-width chart
+# rows (see the boards here) so each chart gets the whole screen when narrow.
+style:
+  frame:
+    max_width: 800
