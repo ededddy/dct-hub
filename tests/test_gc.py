@@ -20,7 +20,9 @@ def make_record(key, board, days_old, variables=None, artifact_path=None):
         board=board,
         variables=variables or {},
         format="html",
-        artifact_path=artifact_path or f"/nonexistent/{key}.html",
+        # blob locators are store-root-relative; the blob layer rejects
+        # absolute or escaping paths
+        artifact_path=artifact_path or f"sales_daily/{key}.html",
         status="ok",
         error=None,
         duration_ms=5,
@@ -46,10 +48,11 @@ def run(coro):
 
 def test_age_pruning_skips_frozen(tmp_path):
     sweeper, store = make_sweeper(tmp_path, enabled=True, max_age_days=30)
-    old_file = tmp_path / "old.html"
+    old_file = tmp_path / ".hub" / "artifacts" / "sales_daily" / "old.html"
+    old_file.parent.mkdir(parents=True, exist_ok=True)
     old_file.write_text("<html>old</html>")
     run(store.put(make_record("old-frozen", "sales_daily", 90, {"day": "2026-01-01"})))
-    run(store.put(make_record("old-live", "sales_daily", 90, {"day": "2099-01-01"}, artifact_path=str(old_file))))
+    run(store.put(make_record("old-live", "sales_daily", 90, {"day": "2099-01-01"}, artifact_path="sales_daily/old.html")))
     run(store.put(make_record("young", "sales_daily", 5, {"day": "2099-01-01"})))
 
     assert run(sweeper.sweep_once()) == 1

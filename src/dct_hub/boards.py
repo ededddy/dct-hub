@@ -34,12 +34,24 @@ def normalize_board(ref: str) -> str:
 
 
 def resolve_board_file(charts_root: Path, board: str) -> Path:
+    root = charts_root.resolve()
     for suffix in (".yml", ".yaml"):
-        candidate = (charts_root / f"{board}{suffix}").resolve()
-        if not candidate.is_relative_to(charts_root.resolve()):
-            raise InvalidBoardRef(board)
-        if candidate.is_file():
-            return candidate
+        try:
+            candidate = (charts_root / f"{board}{suffix}").resolve()
+            if not candidate.is_relative_to(root):
+                raise InvalidBoardRef(board)
+            # Directory entries carry the true on-disk spelling, so this match
+            # stays exact even on case-insensitive filesystems (APFS, Windows),
+            # where is_file() would also succeed for a differently-cased ref
+            # and thereby dodge path-grant string matching.
+            if any(p.name == candidate.name for p in candidate.parent.iterdir()):
+                return candidate
+        except FileNotFoundError:
+            continue  # parent directory does not exist
+        except ValueError as exc:  # embedded NUL etc.: invalid ref, not a 500
+            if isinstance(exc, InvalidBoardRef):
+                raise
+            raise InvalidBoardRef(board) from exc
     raise BoardNotFoundError(board)
 
 

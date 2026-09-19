@@ -198,3 +198,17 @@ def test_interrupted_jobs_recovered_on_start(tmp_path):
         client.post("/api/renders", json={"board": "sales_daily", "wait": True})
         job = client.get("/api/jobs/stale1").json()
         assert job["status"] == "interrupted"
+
+
+def test_wait_leaves_no_done_event(tmp_path):
+    fake = FakeDct()
+    with TestClient(make_app(tmp_path, fake)) as client:
+        resp = client.post("/api/renders", json={"board": "sales_daily", "wait": True})
+        assert resp.status_code == 200
+        assert client.app.state.service.queue._done == {}
+
+        # submit-and-forget (202 without wait) also registers nothing
+        resp = client.post("/api/renders", json={"board": "sales_daily", "force": True})
+        assert resp.status_code == 202
+        wait_job(client, resp.json()["job_id"])
+        assert client.app.state.service.queue._done == {}

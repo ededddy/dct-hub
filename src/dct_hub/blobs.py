@@ -21,6 +21,9 @@ class BlobMissing(Exception):
 def artifact_locator(board: str, key: str, fmt: str) -> str:
     if not re.fullmatch(r"[a-z0-9]+", fmt):
         raise ValueError(f"unsafe artifact format: {fmt!r}")
+    parts = board.split("/")
+    if board.startswith("/") or "\\" in board or any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"unsafe artifact board: {board!r}")
     return f"{board}/{key}.{fmt}"
 
 
@@ -48,9 +51,15 @@ class LocalBlobs:
         self.root = root
         self.staging_dir = root / ".staging"
         self.staging_dir.mkdir(parents=True, exist_ok=True)
+        self._resolved_root = root.resolve()
 
     def _path(self, locator: str) -> Path:
-        return self.root / locator
+        # Locators come from our own metadata, but never trust them blindly:
+        # a planted absolute or ../ locator must not escape the store root.
+        path = (self.root / locator).resolve()
+        if not path.is_relative_to(self._resolved_root):
+            raise ValueError(f"unsafe blob locator: {locator!r}")
+        return path
 
     def staging_path(self, locator: str) -> Path:
         return self.staging_dir / f"{uuid.uuid4().hex}.tmp"
@@ -97,6 +106,8 @@ class S3Blobs:
         return aiobotocore.session.get_session()
 
     def _key(self, locator: str) -> str:
+        if locator.startswith("/") or any(p in ("", ".", "..") for p in locator.split("/")):
+            raise ValueError(f"unsafe blob locator: {locator!r}")
         return f"{self.prefix}/{locator}" if self.prefix else locator
 
     def staging_path(self, locator: str) -> Path:

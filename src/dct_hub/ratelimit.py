@@ -20,9 +20,20 @@ class RateLimiter:
         if self.limit <= 0:
             return True
         now = time.monotonic()
-        hits = self._hits.setdefault(key, deque())
-        while hits and now - hits[0] >= WINDOW_S:
-            hits.popleft()
+        hits = self._hits.get(key)
+        if hits is not None:
+            while hits and now - hits[0] >= WINDOW_S:
+                hits.popleft()
+            if not hits:
+                del self._hits[key]  # idle identity: drop the empty window
+                hits = None
+        if hits is None:
+            if len(self._hits) >= 10_000:
+                # bound one-shot identity growth: keep only active windows
+                cutoff = now - WINDOW_S
+                self._hits = {k: h for k, h in self._hits.items() if h and h[-1] > cutoff}
+            hits = deque()
+            self._hits[key] = hits
         if len(hits) >= self.limit:
             return False
         hits.append(now)
