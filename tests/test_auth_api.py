@@ -179,7 +179,7 @@ def test_oidc_login_then_grants_enforced(env):
     assert boards == {"sales_daily", "finance/q4"}
 
     # logout drops the session
-    client.get("/auth/logout", follow_redirects=False)
+    client.post("/auth/logout", follow_redirects=False)
     assert client.get("/api/boards").status_code == 401
 
 
@@ -218,7 +218,7 @@ def test_expired_id_token_rejected(env):
 def test_jwks_rotation_recovers(env):
     client, _, idp = env
     login(client, idp)  # caches the IdP's JWKS (key #1)
-    client.get("/auth/logout", follow_redirects=False)
+    client.post("/auth/logout", follow_redirects=False)
 
     idp.rotate_key()  # same kid, new key material — cached JWKS is now stale
     login(client, idp)  # must refetch JWKS and succeed
@@ -231,3 +231,31 @@ def test_open_redirect_blocked(env):
     assert resp.status_code in (302, 307)
     # login proceeds but `next` is sanitized to "/"
     assert "state=" in resp.headers["location"]
+
+
+def test_login_next_rejects_backslash_variants(env):
+    client, _, idp = env
+    for bad in ("/\\evil.test", "/%5Cevil.test"):
+        resp = client.get(f"/auth/login?next={bad}", follow_redirects=False)
+        assert resp.status_code in (302, 307)
+        auth_url = urlparse(resp.headers["location"])
+        idp_resp = idp_get(idp, f"{auth_url.path}?{auth_url.query}")
+        callback = urlparse(idp_resp.headers["location"])
+        resp = client.get(f"{callback.path}?{callback.query}", follow_redirects=False)
+        assert resp.headers["location"] == "/", bad
+        client.post("/auth/logout")
+
+
+def test_id_token_without_exp_rejected(env):
+    client, _, idp = env
+    idp.omit_exp = True
+    resp = client.get("/auth/login", follow_redirects=False)
+    auth_url = urlparse(resp.headers["location"])
+    idp_resp = idp_get(idp, f"{auth_url.path}?{auth_url.query}")
+    callback = urlparse(idp_resp.headers["location"])
+    assert client.get(f"{callback.path}?{callback.query}", follow_redirects=False).status_code == 401
+
+
+def test_logout_requires_post(env):
+    client, _, _ = env
+    assert client.get("/auth/logout", follow_redirects=False).status_code == 405
