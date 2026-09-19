@@ -52,7 +52,7 @@ ACCESS_CONFIG = {
 }
 
 
-def build_authed(tmp_path, monkeypatch, policy=None):
+def build_authed(tmp_path, monkeypatch, policy=None, auth=None):
     monkeypatch.setenv("DCT_HUB_TEST_TOKEN", "env-token")
     charts = tmp_path / "proj" / "charts"
     (charts / "finance").mkdir(parents=True)
@@ -63,7 +63,7 @@ def build_authed(tmp_path, monkeypatch, policy=None):
 
     idp = FakeIdP()
     oidc_http = httpx.AsyncClient(transport=httpx.ASGITransport(app=idp.app()))
-    kwargs = {"auth": AUTH_CONFIG, "access": ACCESS_CONFIG}
+    kwargs = {"auth": auth or AUTH_CONFIG, "access": ACCESS_CONFIG}
     if policy is not None:
         kwargs["policy"] = policy
     config = Config(project_dir=tmp_path / "proj", storage={"dir": tmp_path / ".hub"}, **kwargs)
@@ -353,3 +353,18 @@ def test_render_key_and_job_existence_not_oracle(env):
     assert unknown_job.status_code == forbidden_job.status_code == 404
     assert unknown_job.json()["detail"].startswith("unknown job:")
     assert forbidden_job.json()["detail"].startswith("unknown job:")
+
+
+def test_oidc_redirect_url_pinned(tmp_path, monkeypatch):
+    auth = dict(AUTH_CONFIG)
+    auth["oidc"] = {
+        "issuer": ISSUER,
+        "client_id": CLIENT_ID,
+        "redirect_url": "https://hub.example.com/auth/callback",
+    }
+    app, _, _ = build_authed(tmp_path, monkeypatch, auth=auth)
+    with TestClient(app) as client:
+        resp = client.get("/auth/login", follow_redirects=False)
+        assert resp.status_code in (302, 307)
+        # the IdP is sent the pinned callback, not the request-derived one
+        assert "redirect_uri=https%3A%2F%2Fhub.example.com%2Fauth%2Fcallback" in resp.headers["location"]

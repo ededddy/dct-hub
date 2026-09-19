@@ -48,9 +48,10 @@ Response:
 ```
 
 Errors: `400` invalid board reference or unknown/invalid variable, `404`
-unknown board, `422` unknown format, `429` per-identity render rate limit
-(`policy.max_renders_per_minute`), `502` render failed (detail carries the
-dct stderr tail), `504` render timeout.
+unknown board, `413` request body over 1 MiB, `422` unknown format, `429`
+per-identity render rate limit (`policy.max_renders_per_minute`), `502` render
+failed (generic detail; the full stderr is logged server-side and attached to
+the job record, visible to `refresh` grantees), `504` render timeout.
 
 ### `POST /api/warm`
 
@@ -87,17 +88,22 @@ CI usage: `curl -fsSL -X POST $HUB/api/warm -H "Authorization: Bearer $TOKEN"`.
 
 ### `GET /api/renders/{key}`
 Artifact metadata (successful renders only — failures live on jobs). `404` if
-unknown. Requires `view` on the artifact's board.
+unknown or not viewable (identical response either way — no existence oracle).
+Requires `view` on the artifact's board.
 
 ### `GET /api/renders/{key}/artifact`
-Raw artifact bytes with the format's media type. Requires `view`.
+Raw artifact bytes with the format's media type. Requires `view` (same
+unknown/unauthorized 404 shape).
 
 ## Jobs
 
 ### `GET /api/jobs` and `GET /api/jobs/{job_id}`
 Job status: `queued | running | done | error | interrupted`, plus mode
-(`auto`/`force`), `requested_by`, error tail, and timings. The list endpoint
-is newest-first (limit default 50) and filtered to boards the caller can view.
+(`auto`/`force`), `requested_by`, error tail, and timings. The error tail
+carries dct/warehouse stderr, so it is returned only to callers with `refresh`
+on the job's board; view-only callers get `error: null`. The list endpoint is
+newest-first (`limit` 1-500, default 50) and filtered to boards the caller can
+view. Unknown and unauthorized job ids return the same `404`.
 
 ## Catalog
 
@@ -120,7 +126,9 @@ types, defaults, options), layout. Requires `view`.
 happen. Both validate variables against the board's declarations first (`400`),
 and render submissions are capped by `policy.max_renders_per_minute` (`429`;
 over the limit, a stale artifact is simply served without the background
-refresh). Responses include `X-Dct-Hub-Key`, `X-Rendered-At`, and
+refresh). The stale-while-revalidate enqueue requires the `refresh` grant —
+view-only identities are always just served the stale artifact. Responses
+include `X-Dct-Hub-Key`, `X-Rendered-At`, and
 `Cache-Control: no-cache`. HTML artifacts are served with
 `Content-Security-Policy: sandbox allow-scripts` — chart JS runs, but the
 artifact executes in an opaque origin with no cookies, storage, or API access

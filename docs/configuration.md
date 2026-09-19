@@ -43,7 +43,7 @@ modes starts a fresh store: no migration — re-warm after switching.
 | `frozen_date_vars` | `true` | All-past date variables → immutable artifact |
 | `min_interval_s` | `300` | Min seconds between renders of one artifact (`force` excepted) |
 | `max_concurrent` | `2` | Render workers (forced to 1 if `render.query_cache` set) |
-| `max_renders_per_minute` | `0` | Per-identity cap on render submissions per minute, across auto and force. `0` = unlimited |
+| `max_renders_per_minute` | `30` | Per-identity cap on render submissions per minute, across auto and force. `0` = unlimited |
 
 Variables reaching a render are validated against the board's `dct describe`
 declarations before any warehouse query runs: unknown names, out-of-list
@@ -97,9 +97,9 @@ the cap with the warm list in mind.
 |---|---|---|
 | `enabled` | `false` | Master switch. Off = anonymous full access (dev loop) |
 | `session_secret` | — | Cookie signing key, `${ENV_VAR}`. Required when enabled; the dev default is rejected |
-| `session_https_only` | `false` | Set `true` behind TLS (production) |
+| `session_https_only` | `false` | Set `true` behind TLS (production); startup warns when auth is on without it |
 | `session_max_age_s` | `43200` | Session cookie lifetime |
-| `oidc` | unset | Keycloak: `issuer` (realm URL), `client_id`, `client_secret`, `scopes`, `groups_claim` |
+| `oidc` | unset | Keycloak: `issuer` (realm URL), `client_id`, `client_secret`, `scopes`, `groups_claim`, `redirect_url` (pin the callback URL instead of deriving it from the request Host) |
 | `service_tokens` | `[]` | `[{token, name, groups}]` for CI/cron |
 
 ## `access:` — grants

@@ -119,10 +119,12 @@ editing a board or upgrading dct produces a fresh render automatically.
   rendered once and served forever — yesterday's snapshot is immutable.
 - **Fresh/stale**: anything else is served from cache for `default_ttl_s`;
   past that, views serve the stale artifact immediately while a background
-  refresh is enqueued (stale-while-revalidate), and `POST /api/renders`
-  returns 202.
+  refresh is enqueued for identities with the `refresh` grant
+  (stale-while-revalidate), and `POST /api/renders` returns 202.
 - **Rate limit**: re-renders of the same artifact are blocked within
-  `min_interval_s` of the last job (`force: true` excepted).
+  `min_interval_s` of the last job (`force: true` excepted), and each identity
+  is capped at `policy.max_renders_per_minute` submissions per minute
+  (default 30; 0 disables).
 - Identical concurrent render requests coalesce onto one job (single-flight).
   With `render.query_cache` set, renders serialize (DuckDB single-writer).
 
