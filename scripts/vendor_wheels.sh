@@ -53,6 +53,27 @@ if ((${#sdists[@]})); then
 fi
 rm -rf wheels_raw
 
+# Image install anchor: hashes of the actual vendored wheels. Wheels rebuilt
+# from sdists never match the PyPI artifact hashes in requirements.lock, so
+# the image verifies against this file instead (commit it alongside the lock).
+# Native sdists (e.g. dbt-core-experimental-parser) build for the host
+# platform — vendor on linux/amd64 (or in the base image) for x86_64 builds.
+python3 - <<'EOF'
+import hashlib
+from pathlib import Path
+
+lines = []
+for whl in sorted(Path("wheels").glob("*.whl")):
+    name, version = whl.name.split("-")[:2]
+    digest = hashlib.sha256(whl.read_bytes()).hexdigest()
+    lines.append(f"{name}=={version} \\\n    --hash=sha256:{digest}")
+Path("image.lock").write_text(
+    "# hashes of the vendored wheel set; regenerate via scripts/vendor_wheels.sh\n"
+    + "\n".join(lines)
+    + "\n"
+)
+EOF
+
 uv build --wheel -o dist
 
-echo "vendored $(ls wheels | wc -l | tr -d ' ') wheels + $(ls dist)"
+echo "vendored $(ls wheels | wc -l | tr -d ' ') wheels + $(ls dist); image.lock updated"
