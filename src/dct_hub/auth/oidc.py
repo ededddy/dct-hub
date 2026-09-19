@@ -106,6 +106,9 @@ class OidcClient:
             jose_jwt.JWTClaimsRegistry(now=int(time.time()), leeway=30).validate(claims)
         except (jose_errors.JoseError, ValueError) as exc:
             raise HTTPException(status_code=401, detail="ID token claims invalid or expired") from exc
+        # the registry only validates claims that exist; OIDC requires exp
+        if "exp" not in claims:
+            raise HTTPException(status_code=401, detail="ID token missing expiry")
 
         if claims.get("iss") != self.config.issuer.rstrip("/") and claims.get("iss") != self.config.issuer:
             raise HTTPException(status_code=401, detail="bad issuer")
@@ -132,18 +135,30 @@ def new_txn(next_url: str) -> dict:
 
 
 def _safe_next(next_url: str) -> str:
-    if next_url.startswith("/") and not next_url.startswith("//"):
+    # Local paths only. Browsers treat backslash as a path separator, so
+    # "/\evil.test" acts as a protocol-relative URL; control chars are never
+    # legitimate in a path.
+    if (
+        next_url.startswith("/")
+        and not next_url.startswith("//")
+        and "\\" not in next_url
+        and not any(ord(c) < 0x20 or ord(c) == 0x7F for c in next_url)
+    ):
         return next_url
     return "/"
 
 
 def register_auth_routes(app: FastAPI, oidc: OidcClient, groups_claim: str) -> None:
+    def callback_url(request: Request) -> str:
+        # url_for derives scheme/host from the request, which a proxy can make
+        # wrong and a forged Host header can influence; prefer the pinned URL.
+        return oidc.config.redirect_url or str(request.url_for("oidc_callback"))
+
     @app.get("/auth/login", include_in_schema=False)
     async def login(request: Request, next: str = "/") -> RedirectResponse:
         txn = new_txn(_safe_next(next))
         request.session["oidc_txn"] = txn
-        redirect_uri = str(request.url_for("oidc_callback"))
-        return RedirectResponse(await oidc.authorize_url(redirect_uri, txn))
+        return RedirectResponse(await oidc.authorize_url(callback_url(request), txn))
 
     @app.get("/auth/callback", include_in_schema=False, name="oidc_callback")
     async def oidc_callback(request: Request, code: str = "", state: str = "") -> RedirectResponse:
@@ -152,7 +167,7 @@ def register_auth_routes(app: FastAPI, oidc: OidcClient, groups_claim: str) -> N
             logger.warning("OIDC callback with bad or missing state")
             raise HTTPException(status_code=400, detail="bad OAuth state")
         try:
-            tokens = await oidc.exchange(code, str(request.url_for("oidc_callback")), txn["verifier"])
+            tokens = await oidc.exchange(code, callback_url(request), txn["verifier"])
             claims = await oidc.validate_id_token(tokens["id_token"], txn["nonce"])
         except HTTPException as exc:
             logger.warning("OIDC callback failed: %s", exc.detail)
@@ -169,12 +184,14 @@ def register_auth_routes(app: FastAPI, oidc: OidcClient, groups_claim: str) -> N
         logger.info("login: %s", claims.get("sub", ""))
         return RedirectResponse(txn["next"])
 
-    @app.get("/auth/logout", include_in_schema=False)
+    # POST-only: SameSite=lax still sends the session cookie on cross-site
+    # top-level GET navigations, so a GET logout is a forced-logout CSRF vector.
+    @app.post("/auth/logout", include_in_schema=False)
     async def logout(request: Request) -> RedirectResponse:
         user = request.session.get("user") or {}
         logger.info("logout: %s", user.get("sub", ""))
         request.session.clear()
-        return RedirectResponse("/")
+        return RedirectResponse("/", status_code=303)
 
     @app.get("/auth/me", include_in_schema=False)
     async def me(request: Request) -> dict:

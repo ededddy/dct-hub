@@ -24,6 +24,7 @@ class FakeIdP:
         self.codes: dict[str, dict] = {}
         self.user = {"sub": "u-ada", "name": "Ada Lovelace", "email": "ada@corp.test", "groups": ["data"]}
         self.exp_delta = 600
+        self.omit_exp = False
 
     def _generate_key(self) -> None:
         private_pem = rsa.generate_private_key(65537, 2048).private_bytes(
@@ -63,13 +64,14 @@ class FakeIdP:
                 "iss": self.issuer,
                 "sub": self.user["sub"],
                 "aud": self.client_id,
-                "exp": now + self.exp_delta,
                 "iat": now,
                 "nonce": info["nonce"],
                 "name": self.user["name"],
                 "email": self.user["email"],
                 "groups": self.user["groups"],
             }
+            if not self.omit_exp:
+                claims["exp"] = now + self.exp_delta
             id_token = jose_jwt.encode({"alg": "RS256", "kid": "test", "typ": "JWT"}, claims, self.key)
             return JSONResponse({"access_token": "at", "id_token": id_token, "token_type": "Bearer"})
 

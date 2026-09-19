@@ -23,6 +23,10 @@ class OidcConfig(BaseModel):
     client_secret: str = ""
     scopes: str = "openid profile email"
     groups_claim: str = "groups"
+    # Absolute callback URL as registered with the IdP. When unset, the
+    # callback URL is derived from the incoming request's scheme/host — pin it
+    # when the hub sits behind a proxy or Host-header-derived URLs are unwanted.
+    redirect_url: str | None = None
 
     @model_validator(mode="after")
     def _expand(self) -> "OidcConfig":
