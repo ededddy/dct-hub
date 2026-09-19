@@ -27,6 +27,7 @@ def test_defaults(tmp_path):
     assert config.dct_bin == "dct"
     assert config.render.format == "html"
     assert config.render.query_cache is None
+    assert config.policy.max_renders_per_minute == 30  # abuse cap is on by default
 
 
 def test_warm_normalizes_string_entries(tmp_path):
