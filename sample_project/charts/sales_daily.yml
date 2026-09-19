@@ -127,9 +127,13 @@ charts:
         orders:
           format: integer
 
+# Layout follows the same mobile-friendly pattern as guide.yml: KPIs share
+# one row, then each chart takes a full-width row so it uses the whole
+# screen when the board scales down on a phone.
 rows:
   - text: |
       Report date: **{{ day }}** · Region: **{{ region or 'All' }}**
   - cols: [revenue_kpi, orders_kpi, avg_order_kpi]
-  - cols: [revenue_trend, region_breakdown]
+  - revenue_trend
+  - region_breakdown
   - detail_table

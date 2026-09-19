@@ -124,7 +124,11 @@ charts:
           format: integer
 
 # Layout: rows stack, cols sit side by side. Name a chart to place it; a
-# `text:` block is Markdown and can read variables.
+# `text:` block is Markdown and can read variables. The board ships as one
+# SVG the page scales to the window, so the mobile-friendly pattern is:
+# KPIs share a row (big numerals survive scaling) while every chart takes a
+# full-width row, getting the whole screen on a phone instead of shrinking
+# to half. meta.yml caps the board width so that scale stays readable.
 rows:
   - text: |
       Region control: {{ region or 'All' }}. These inline rows are not
@@ -132,7 +136,8 @@ rows:
       replaces them (step 2 below). Edit `charts/guide.yml` and watch this
       page change.
   - cols: [revenue_kpi, orders_kpi, avg_order_kpi]
-  - cols: [revenue_trend, revenue_by_product]
+  - revenue_trend
+  - revenue_by_product
   - monthly_detail
   - title: Make it yours
     text: |
