@@ -44,6 +44,11 @@
   @media (max-width: 768px) {
     .search { margin-top: 0; }
     .grid { grid-template-columns: 1fr; }
+    /* 16px minimum or iOS Safari zooms the page on input focus */
+    .search input { font-size: 16px; }
+    .pill { padding: 8px 14px; }
+    /* 44x44 hit area; the star glyph stays the same size */
+    .fav { min-width: 44px; min-height: 44px; padding: 12px; top: 2px; right: 4px; }
   }
 </style>
 

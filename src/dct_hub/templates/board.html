@@ -49,9 +49,17 @@
   table.snapshots th { color: var(--muted); font-weight: 600; font-size: 12px; }
   @media (max-width: 768px) {
     .board-head h1 { font-size: 19px; }
-    .field input, .field select { min-width: 0; width: 100%; }
+    /* 16px minimum or iOS Safari zooms the page on input focus */
+    .field input, .field select { min-width: 0; width: 100%; font-size: 16px; }
     .field { flex: 1 1 100%; }
     iframe { height: 64vh; }
+    /* let the render timestamp wrap; nowrap overflows 320px viewports */
+    .status-line .meta-item { white-space: normal; }
+    /* touch targets */
+    .segmented button { padding: 10px 16px; }
+    .controls .apply { padding: 10px 16px; }
+    details.history summary { padding: 10px 0; }
+    table.snapshots td a { display: inline-block; padding: 8px 10px; }
   }
 </style>
 

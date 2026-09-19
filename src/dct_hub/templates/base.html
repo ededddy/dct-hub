@@ -89,6 +89,12 @@
     button.primary:hover:not(:disabled) { filter: brightness(1.08); }
     button.primary:active:not(:disabled) { transform: translateY(1px); }
     button.primary:disabled { opacity: .55; cursor: default; }
+    @media (max-width: 768px) {
+      /* touch targets: keep header controls comfortably tappable */
+      .ghost { padding: 8px 16px; }
+      .side a { display: inline-block; padding: 5px 2px; }
+      button.primary { padding: 10px 16px; }
+    }
   </style>
 </head>
 <body>
